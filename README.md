@@ -24,6 +24,11 @@ This project analyzes tennis gestures from video input and compares them to a da
    pip install -r requirements.txt
    ```
 
+**Note**: This project uses MediaPipe for pose estimation. You'll need to download the pose estimation model separately:
+```bash
+wget https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task
+```
+
 ## Usage
 
 ```bash
@@ -54,9 +59,12 @@ python main.py my_tennis_video.mp4 --output analysis_output.mp4
 
 ## Architecture
 
-- `gesture_analyzer.py`: Core gesture analysis and comparison logic
+- `gesture_analyzer_simple.py`: Core gesture analysis and comparison logic
 - `main.py`: Main application entry point
 - `setup.py`: Installation and dependency management
+- `add_gesture.py`: Utility to add new gestures to the database
+- `demo.py`: Demonstration script
+- `test_system.py`: System verification script
 - `requirements.txt`: Project dependencies
 
 ## Database Structure
@@ -78,8 +86,7 @@ The gesture database contains:
 
 ## Future Enhancements
 
-- Support for more tennis players and strokes
-- Real-time analysis capability
+- Integration with real-time pose estimation
 - Advanced biomechanical analysis
 - Integration with wearable sensors
 - Performance tracking over time
