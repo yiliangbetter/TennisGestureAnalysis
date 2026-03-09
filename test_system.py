@@ -4,7 +4,7 @@ Simple test to verify the Tennis Gesture Analysis system
 import os
 import cv2
 import numpy as np
-from gesture_analyzer_simple import TennisGestureAnalyzer, create_sample_database
+from enhanced_gesture_analyzer import EnhancedTennisGestureAnalyzer, create_enhanced_sample_database
 
 def create_test_video(filename, num_frames=30):
     """Create a simple test video for demonstration"""

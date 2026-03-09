@@ -3,7 +3,7 @@
 ## Project Structure
 ```
 TennisGestureAnalysis/
-├── gesture_analyzer_simple.py    # Core gesture analysis engine
+├── enhanced_gesture_analyzer.py  # Enhanced gesture analysis engine with multiple feature extraction methods
 ├── main.py                      # Main application entry point
 ├── demo.py                      # Demo script
 ├── add_gesture.py               # Script to add new gestures to database
@@ -16,17 +16,40 @@ TennisGestureAnalysis/
 
 ## Description
 
-This project implements a tennis gesture analysis system that:
-- Analyzes tennis movements from video input using computer vision
+This project implements an enhanced tennis gesture analysis system that:
+- Analyzes tennis movements from video input using multiple computer vision techniques
+- Combines pose estimation with optical flow and motion history analysis
 - Compares user's technique to a database of professional tennis players
 - Provides similarity scores and personalized recommendations for improvement
 - Generates annotated output videos showing analysis
 
+## Enhanced Features
+
+### 1. Multi-Modal Feature Extraction
+- **Pose Landmarks**: Joint positions and configurations
+- **Optical Flow**: Motion patterns between frames
+- **Motion History**: Temporal motion representation
+- **HOG Features**: Shape and motion descriptors
+- **Joint Angles**: Kinematic relationships
+- **Movement Trajectories**: Path of key body parts
+- **Velocity/Acceleration**: Dynamic motion analysis
+
+### 2. Advanced Comparison Algorithms
+- Pose similarity using normalized distances
+- Angle similarity with tennis-specific thresholds
+- Trajectory similarity for stroke path analysis
+- Motion pattern similarity using velocity vectors
+
+### 3. Tennis-Specific Analysis
+- Stroke segmentation and classification
+- Technique deviation detection
+- Professional-level recommendation generation
+
 ## Core Components
 
-### 1. Gesture Analyzer (`gesture_analyzer_simple.py`)
-- Core engine that extracts gesture features from videos
-- Implements pose landmark simulation and comparison algorithms
+### 1. Enhanced Gesture Analyzer (`enhanced_gesture_analyzer.py`)
+- Core engine with multiple feature extraction methods
+- Implements pose estimation, optical flow, and motion history
 - Contains methods for gesture feature extraction, similarity calculation, and difference analysis
 - Manages gesture database with save/load functionality
 
@@ -66,20 +89,20 @@ python3 add_gesture.py professional_video.mp4 "Player Name - Stroke Type"
 ## Technical Details
 
 The system performs:
-1. Video frame processing and pose feature extraction
-2. Comparison of user's technique with professional players
-3. Calculation of similarity scores based on:
-   - Joint positions and landmarks
-   - Joint angles
-   - Movement trajectories
-   - Velocity and acceleration patterns
-4. Generation of personalized recommendations for improvement
+1. Video frame processing with multiple feature extraction
+2. Pose estimation for joint position analysis
+3. Optical flow computation for motion analysis
+4. Motion history image generation for temporal context
+5. HOG feature extraction for shape analysis
+6. Comparison of user's technique with professional players
+7. Calculation of similarity scores based on multiple metrics
+8. Generation of personalized recommendations for improvement
 
 ## Key Features
 
-- Multi-dimensional gesture comparison
-- Detailed difference analysis
-- Professional-level recommendations
+- Multi-modal gesture comparison using pose, motion, and trajectory data
+- Detailed difference analysis with frame-by-frame breakdown
+- Professional-level recommendations based on technique deviations
 - Extensible gesture database
 - Video annotation capabilities
 
@@ -93,10 +116,11 @@ The system performs:
 
 ## Dependencies
 
-- OpenCV: Video processing
+- OpenCV: Video processing and computer vision
 - NumPy: Numerical computation
 - Scikit-learn: Similarity calculations
+- SciPy: Distance calculations
 - MediaPipe: Pose estimation (when implemented)
 - Pickle: Data serialization
 
-This system provides a foundation for tennis technique analysis and can be extended to support professional-level coaching feedback.
+This system provides an advanced foundation for tennis technique analysis and can be extended to support professional-level coaching feedback.

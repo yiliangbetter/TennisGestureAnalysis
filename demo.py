@@ -5,7 +5,7 @@ Demo script for Tennis Gesture Analysis
 import os
 import subprocess
 import sys
-from gesture_analyzer_simple import TennisGestureAnalyzer, create_sample_database
+from enhanced_gesture_analyzer import EnhancedTennisGestureAnalyzer, create_enhanced_sample_database
 
 
 def run_demo():

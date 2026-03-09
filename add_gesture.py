@@ -7,7 +7,7 @@ import numpy as np
 import pickle
 import sys
 import os
-from gesture_analyzer_simple import TennisGestureAnalyzer, GestureFeature
+from enhanced_gesture_analyzer import EnhancedTennisGestureAnalyzer, EnhancedGestureFeature
 
 
 def extract_gesture_from_video(video_path: str, gesture_name: str):

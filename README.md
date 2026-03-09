@@ -48,18 +48,21 @@ python main.py my_tennis_video.mp4 --output analysis_output.mp4
 ## How It Works
 
 1. **Video Processing**: The system processes video frames to detect human pose landmarks using MediaPipe
-2. **Feature Extraction**: Extracts key gesture features including:
+2. **Enhanced Feature Extraction**: Extracts key gesture features including:
    - Joint positions (shoulders, elbows, wrists, hips, knees, ankles)
    - Joint angles
    - Movement trajectories
    - Velocity and acceleration vectors
+   - Optical flow for motion patterns
+   - Motion history images
+   - Histogram of Oriented Gradients (HOG) features
 3. **Comparison**: Compares extracted features with a database of professional tennis players
 4. **Analysis**: Calculates similarity scores and identifies differences
 5. **Recommendations**: Provides personalized tips for technique improvement
 
 ## Architecture
 
-- `gesture_analyzer_simple.py`: Core gesture analysis and comparison logic
+- `enhanced_gesture_analyzer.py`: Enhanced gesture analysis and comparison logic with multiple feature extraction methods
 - `main.py`: Main application entry point
 - `setup.py`: Installation and dependency management
 - `add_gesture.py`: Utility to add new gestures to the database
@@ -75,6 +78,8 @@ The gesture database contains:
 - Key joint positions and angles
 - Movement trajectories
 - Timing information
+- Optical flow data
+- Motion history representations
 
 ## Technologies Used
 
