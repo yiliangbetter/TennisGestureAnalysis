@@ -20,7 +20,10 @@
       "Bash(git config --global user.email)",
       "Bash(git commit -m \"Initial commit: Tennis Gesture Analysis System\n\n- Implement core gesture analysis engine\n- Add video processing capabilities\n- Create professional player gesture database\n- Add command-line interface for analysis\n- Include demo and test scripts\n- Add comprehensive documentation\")",
       "Bash(git rm gesture_analyzer.py gesture_analyzer_fixed.py gesture_analyzer_new_api.py)",
-      "Bash(git commit -m \"Cleanup: Remove redundant gesture analyzer files, keep only the working version\")"
+      "Bash(git commit -m \"Cleanup: Remove redundant gesture analyzer files, keep only the working version\")",
+      "Bash(git commit -m \"Remove private settings file from tracking\")",
+      "Bash(git add .gitignore)",
+      "Bash(git add -A)"
     ]
   }
 }
