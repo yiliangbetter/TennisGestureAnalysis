@@ -26,6 +26,31 @@ except ImportError:
 # If legacy API not available, use OpenCV DNN-based pose estimation
 USE_OPENCV_POSE = not MEDIAPIPE_LEGACY
 
+# Fallback landmark layout: fractions of bounding box height (bh) or width (bw).
+# All offsets are scale-invariant (fraction of bh/bw), not pixel values.
+BBOX_HEAD_CENTER_Y_FRAC = 0.15   # Head center vertical position (from bbox top)
+BBOX_EYE_HORIZONTAL_FRAC = 0.02  # Eye horizontal offset from nose (fraction of bh)
+BBOX_EYE_ABOVE_NOSE_FRAC = 0.02  # Eye vertical offset above nose
+BBOX_EAR_HORIZONTAL_FRAC = 0.05  # Ear horizontal offset from nose
+BBOX_EAR_VERTICAL_FRAC = 0.01    # Ear vertical offset from nose
+BBOX_MOUTH_BELOW_NOSE_FRAC = 0.04   # Mouth center below nose
+BBOX_MOUTH_HALF_WIDTH_FRAC = 0.04   # Mouth half-width
+BBOX_SHOULDER_Y_FRAC = 0.25
+BBOX_SHOULDER_HALF_WIDTH_FRAC = 0.4  # half-width from center, as fraction of bw
+BBOX_ELBOW_Y_FRAC = 0.45
+BBOX_ELBOW_WIDTH_FRAC = 1.2   # multiplier of shoulder half-width
+BBOX_WRIST_Y_FRAC = 0.60
+BBOX_WRIST_WIDTH_FRAC = 1.3
+BBOX_HIP_Y_FRAC = 0.50
+BBOX_HIP_HALF_WIDTH_FRAC = 0.2  # half-width from center, as fraction of bw
+BBOX_HIP_DROP_FRAC = 0.05     # Vertical drop from hip pointer to hip joint
+BBOX_KNEE_Y_FRAC = 0.70
+BBOX_KNEE_WIDTH_FRAC = 0.9
+BBOX_ANKLE_Y_FRAC = 0.90
+BBOX_ANKLE_WIDTH_FRAC = 0.8
+BBOX_FOOT_EXTEND_FRAC = 0.02  # Heel/toe extend below ankle
+BBOX_TOE_FORWARD_FRAC = 0.04
+
 
 @dataclass
 class EnhancedGestureFeature:
@@ -74,9 +99,10 @@ class EnhancedTennisGestureAnalyzer:
                 self.pose_detector = None
                 print("Warning: MediaPipe pose detection not available. Using fallback mode.")
 
-        # Store previous frame landmarks for interpolation when detection fails
+        # Store previous frame landmarks and velocity for interpolation when detection fails
         self.prev_landmarks: Optional[np.ndarray] = None
         self.prev_landmarks_confidence: float = 0.0
+        self.landmark_velocity: Optional[np.ndarray] = None  # (33, 2) per-frame displacement
 
         # Initialize optical flow for motion features
         self.opt_flow = cv2.calcOpticalFlowFarneback
@@ -303,11 +329,18 @@ class EnhancedTennisGestureAnalyzer:
         results = self.pose.process(rgb_frame)
 
         if results.pose_landmarks is None:
-            # No pose detected - return previous landmarks with interpolation if available
+            # No pose detected - velocity-based interpolation from previous landmarks
             if self.prev_landmarks is not None and self.prev_landmarks_confidence > 0.3:
-                # Use interpolated previous landmarks (with reduced confidence weight)
                 self.prev_landmarks_confidence *= 0.9  # Decay confidence
-                return self.prev_landmarks * 0.95 + np.random.normal(0, 0.01, self.prev_landmarks.shape)
+                if self.landmark_velocity is not None:
+                    interpolated = self.prev_landmarks + self.landmark_velocity
+                    interpolated = np.clip(interpolated, 0.0, 1.0)
+                else:
+                    interpolated = self.prev_landmarks.copy()
+                self.prev_landmarks = interpolated
+                if self.landmark_velocity is not None:
+                    self.landmark_velocity *= 0.95  # Decay velocity so we don't extrapolate forever
+                return interpolated
             return None
 
         # Extract landmarks from results
@@ -324,7 +357,9 @@ class EnhancedTennisGestureAnalyzer:
 
         landmarks_array = np.array(landmarks, dtype=np.float32)
 
-        # Update previous landmarks for interpolation
+        # Update velocity from displacement (before overwriting prev_landmarks)
+        if self.prev_landmarks is not None and self.prev_landmarks.shape == landmarks_array.shape:
+            self.landmark_velocity = landmarks_array - self.prev_landmarks
         self.prev_landmarks = landmarks_array.copy()
         self.prev_landmarks_confidence = 1.0
 
@@ -376,62 +411,79 @@ class EnhancedTennisGestureAnalyzer:
 
     def _create_landmarks_from_bbox(self, x: int, y: int, bw: int, bh: int,
                                    img_w: int, img_h: int) -> np.ndarray:
-        """Create approximate 33 landmarks from a bounding box."""
-        landmarks = np.zeros((33, 2), dtype=np.float32)
+        """Create approximate 33 landmarks from a bounding box.
 
-        # Normalize to image coordinates
-        cx, cy = x + bw / 2, y + bh / 2  # Center
+        All positions use fractions of bh/bw so the layout scales with person size.
+        """
+        landmarks = np.zeros((33, 2), dtype=np.float32)
+        cx = x + bw / 2
+
+        # Scale-invariant offsets (fractions of body height)
+        eye_off_x = bh * BBOX_EYE_HORIZONTAL_FRAC
+        eye_off_y = bh * BBOX_EYE_ABOVE_NOSE_FRAC
+        ear_off_x = bh * BBOX_EAR_HORIZONTAL_FRAC
+        ear_off_y = bh * BBOX_EAR_VERTICAL_FRAC
+        mouth_off_y = bh * BBOX_MOUTH_BELOW_NOSE_FRAC
+        mouth_half_w = bh * BBOX_MOUTH_HALF_WIDTH_FRAC
 
         # Head (landmarks 0-10)
-        head_y = y + bh * 0.15
+        head_y = y + bh * BBOX_HEAD_CENTER_Y_FRAC
         head_x = cx
         landmarks[0] = [head_x / img_w, head_y / img_h]  # Nose
-        landmarks[1] = [(head_x - 5) / img_w, (head_y - 5) / img_h]  # Left eye
-        landmarks[2] = [(head_x + 5) / img_w, (head_y - 5) / img_h]  # Right eye
-        landmarks[3] = [(head_x - 15) / img_w, (head_y - 2) / img_h]  # Left ear
-        landmarks[4] = [(head_x + 15) / img_w, (head_y - 2) / img_h]  # Right ear
-        for i in range(5, 11):  # Mouth
-            landmarks[i] = [(head_x - 10 + 4 * (i - 5)) / img_w, (head_y + 10) / img_h]
+        landmarks[1] = [(head_x - eye_off_x) / img_w, (head_y - eye_off_y) / img_h]  # Left eye
+        landmarks[2] = [(head_x + eye_off_x) / img_w, (head_y - eye_off_y) / img_h]  # Right eye
+        landmarks[3] = [(head_x - ear_off_x) / img_w, (head_y - ear_off_y) / img_h]  # Left ear
+        landmarks[4] = [(head_x + ear_off_x) / img_w, (head_y - ear_off_y) / img_h]  # Right ear
+        mouth_y = head_y + mouth_off_y
+        for i in range(5, 11):  # Mouth (6 points)
+            t = (i - 5) / 5.0  # 0 to 1
+            mouth_x = head_x - mouth_half_w + (2 * mouth_half_w * t)
+            landmarks[i] = [mouth_x / img_w, mouth_y / img_h]
 
         # Upper body (11-20)
-        shoulder_y = y + bh * 0.25
-        shoulder_w = bw * 0.4
+        shoulder_y = y + bh * BBOX_SHOULDER_Y_FRAC
+        shoulder_w = bw * BBOX_SHOULDER_HALF_WIDTH_FRAC
         landmarks[11] = [(cx - shoulder_w) / img_w, shoulder_y / img_h]  # Left shoulder
         landmarks[12] = [(cx + shoulder_w) / img_w, shoulder_y / img_h]  # Right shoulder
 
-        elbow_y = y + bh * 0.45
-        landmarks[13] = [(cx - shoulder_w * 1.2) / img_w, elbow_y / img_h]  # Left elbow
-        landmarks[14] = [(cx + shoulder_w * 1.2) / img_w, elbow_y / img_h]  # Right elbow
+        elbow_y = y + bh * BBOX_ELBOW_Y_FRAC
+        elbow_w = shoulder_w * BBOX_ELBOW_WIDTH_FRAC
+        landmarks[13] = [(cx - elbow_w) / img_w, elbow_y / img_h]  # Left elbow
+        landmarks[14] = [(cx + elbow_w) / img_w, elbow_y / img_h]  # Right elbow
 
-        wrist_y = y + bh * 0.60
-        landmarks[15] = [(cx - shoulder_w * 1.3) / img_w, wrist_y / img_h]  # Left wrist
-        landmarks[16] = [(cx + shoulder_w * 1.3) / img_w, wrist_y / img_h]  # Right wrist
+        wrist_y = y + bh * BBOX_WRIST_Y_FRAC
+        wrist_w = shoulder_w * BBOX_WRIST_WIDTH_FRAC
+        landmarks[15] = [(cx - wrist_w) / img_w, wrist_y / img_h]  # Left wrist
+        landmarks[16] = [(cx + wrist_w) / img_w, wrist_y / img_h]  # Right wrist
 
-        # Fingers (simplified)
         for i in range(17, 21):
             landmarks[i] = landmarks[15 if i < 19 else 16]
 
         # Lower body (21-32)
-        hip_y = y + bh * 0.50
-        hip_w = bw * 0.2
+        hip_y = y + bh * BBOX_HIP_Y_FRAC
+        hip_w = bw * BBOX_HIP_HALF_WIDTH_FRAC
+        hip_drop = bh * BBOX_HIP_DROP_FRAC
         landmarks[21] = [(cx - hip_w) / img_w, hip_y / img_h]  # Left hip pointer
         landmarks[22] = [(cx + hip_w) / img_w, hip_y / img_h]  # Right hip pointer
-        landmarks[23] = [(cx - hip_w) / img_w, (hip_y + 20) / img_h]  # Left hip
-        landmarks[24] = [(cx + hip_w) / img_w, (hip_y + 20) / img_h]  # Right hip
+        landmarks[23] = [(cx - hip_w) / img_w, (hip_y + hip_drop) / img_h]  # Left hip
+        landmarks[24] = [(cx + hip_w) / img_w, (hip_y + hip_drop) / img_h]  # Right hip
 
-        knee_y = y + bh * 0.70
-        landmarks[25] = [(cx - hip_w * 0.9) / img_w, knee_y / img_h]  # Left knee
-        landmarks[26] = [(cx + hip_w * 0.9) / img_w, knee_y / img_h]  # Right knee
+        knee_y = y + bh * BBOX_KNEE_Y_FRAC
+        knee_w = hip_w * BBOX_KNEE_WIDTH_FRAC
+        landmarks[25] = [(cx - knee_w) / img_w, knee_y / img_h]  # Left knee
+        landmarks[26] = [(cx + knee_w) / img_w, knee_y / img_h]  # Right knee
 
-        ankle_y = y + bh * 0.90
-        landmarks[27] = [(cx - hip_w * 0.8) / img_w, ankle_y / img_h]  # Left ankle
-        landmarks[28] = [(cx + hip_w * 0.8) / img_w, ankle_y / img_h]  # Right ankle
+        ankle_y = y + bh * BBOX_ANKLE_Y_FRAC
+        ankle_w = hip_w * BBOX_ANKLE_WIDTH_FRAC
+        landmarks[27] = [(cx - ankle_w) / img_w, ankle_y / img_h]  # Left ankle
+        landmarks[28] = [(cx + ankle_w) / img_w, ankle_y / img_h]  # Right ankle
 
-        # Feet
-        landmarks[29] = [(cx - hip_w * 0.9) / img_w, (ankle_y + 5) / img_h]  # Left heel
-        landmarks[30] = [(cx - hip_w * 0.7) / img_w, (ankle_y + 10) / img_h]  # Left toe
-        landmarks[31] = [(cx + hip_w * 0.7) / img_w, (ankle_y + 10) / img_h]  # Right toe
-        landmarks[32] = [(cx + hip_w * 0.9) / img_w, (ankle_y + 5) / img_h]  # Right heel
+        foot_extend = bh * BBOX_FOOT_EXTEND_FRAC
+        toe_forward = bh * BBOX_TOE_FORWARD_FRAC
+        landmarks[29] = [(cx - ankle_w * 1.1) / img_w, (ankle_y + foot_extend) / img_h]  # Left heel
+        landmarks[30] = [(cx - ankle_w * 0.9) / img_w, (ankle_y + toe_forward) / img_h]  # Left toe
+        landmarks[31] = [(cx + ankle_w * 0.9) / img_w, (ankle_y + toe_forward) / img_h]  # Right toe
+        landmarks[32] = [(cx + ankle_w * 1.1) / img_w, (ankle_y + foot_extend) / img_h]  # Right heel
 
         return landmarks
 
@@ -906,6 +958,7 @@ class EnhancedTennisGestureAnalyzer:
         """
         self.prev_landmarks = None
         self.prev_landmarks_confidence = 0.0
+        self.landmark_velocity = None
 
         # Close MediaPipe Pose if using it
         if not self.use_opencv_pose and MEDIAPIPE_LEGACY and hasattr(self, 'pose'):
