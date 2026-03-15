@@ -22,7 +22,7 @@ def main():
         sys.exit(1)
 
     # Initialize analyzer
-    analyzer = TennisGestureAnalyzer()
+    analyzer = EnhancedTennisGestureAnalyzer()
 
     # Load or create database
     if args.load_db and os.path.exists(args.load_db):
@@ -30,7 +30,7 @@ def main():
         analyzer.load_database(args.load_db)
     else:
         print("Creating sample gesture database...")
-        create_sample_database(analyzer)
+        create_enhanced_sample_database(analyzer)
         analyzer.save_database(args.save_db)
         print(f"Sample database saved to {args.save_db}")
 
@@ -51,7 +51,7 @@ def main():
 
         print("\nKey Differences:")
         for i, diff in enumerate(result['differences'][:5]):  # Show first 5 differences
-            print(f"  Frame {diff['frame_index']}: Landmark deviation = {np.mean(diff['landmark_deviation']):.3f}")
+            print(f"  Frame {diff['frame_index']}: Landmark deviation = {np.mean(diff['pose_deviation']):.3f}")
 
         print(f"\nRecommendations ({len(result['recommendations'])} suggestions):")
         for i, rec in enumerate(result['recommendations'], 1):
@@ -67,7 +67,8 @@ def main():
     print("\nAnalysis complete!")
 
 
-def generate_analysis_video(input_path: str, analysis_result: Dict, output_path: str, analyzer: TennisGestureAnalyzer):
+def generate_analysis_video(input_path: str, analysis_result: Dict, output_path: str,
+                           analyzer: EnhancedTennisGestureAnalyzer):
     """
     Generate an output video with analysis overlaid
     """
@@ -91,7 +92,8 @@ def generate_analysis_video(input_path: str, analysis_result: Dict, output_path:
             break
 
         # Process the frame to overlay analysis
-        processed_frame = process_frame_for_analysis(frame, analysis_result, frame_count, analyzer)
+        processed_frame = process_frame_for_analysis(frame, analysis_result, frame_count,
+                                                     width, height, analyzer)
 
         # Write the frame
         out.write(processed_frame)
@@ -107,7 +109,8 @@ def generate_analysis_video(input_path: str, analysis_result: Dict, output_path:
     out.release()
 
 
-def process_frame_for_analysis(frame, analysis_result: Dict, frame_num: int, analyzer: TennisGestureAnalyzer):
+def process_frame_for_analysis(frame: np.ndarray, analysis_result: Dict, frame_num: int,
+                               width: int, height: int, analyzer: EnhancedTennisGestureAnalyzer):
     """
     Process a single frame to overlay analysis information
     """

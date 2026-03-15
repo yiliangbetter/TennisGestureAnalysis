@@ -52,11 +52,11 @@ def test_system():
     create_test_video(test_video_path, num_frames=50)
 
     # Initialize analyzer
-    analyzer = TennisGestureAnalyzer()
+    analyzer = EnhancedTennisGestureAnalyzer()
 
     # Create sample database
     print("Creating sample database...")
-    create_sample_database(analyzer)
+    create_enhanced_sample_database(analyzer)
     print(f"Database contains {len(analyzer.gesture_database)} samples")
 
     # Test finding best match (this would work with real video)
