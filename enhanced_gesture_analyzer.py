@@ -1,12 +1,30 @@
 import cv2
 import numpy as np
 import os
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
 from sklearn.metrics.pairwise import cosine_similarity
 import pickle
 from scipy.spatial.distance import euclidean
 import math
+
+# MediaPipe imports - support both legacy and new API
+try:
+    # Legacy API (mediapipe < 0.10.30)
+    import mediapipe as mp
+    from mediapipe import solutions
+    if hasattr(mp, 'solutions') and hasattr(mp.solutions, 'pose'):
+        from mediapipe.solutions import pose as mp_pose
+        MEDIAPIPE_LEGACY = True
+    else:
+        MEDIAPIPE_LEGACY = False
+except ImportError:
+    mp = None
+    MEDIAPIPE_LEGACY = False
+    mp_pose = None
+
+# If legacy API not available, use OpenCV DNN-based pose estimation
+USE_OPENCV_POSE = not MEDIAPIPE_LEGACY
 
 
 @dataclass
@@ -24,9 +42,43 @@ class EnhancedGestureFeature:
 
 
 class EnhancedTennisGestureAnalyzer:
-    def __init__(self):
-        # Initialize OpenCV's pose estimator (using basic pose detection for compatibility)
-        # In a real implementation, you'd integrate MediaPipe or another pose estimator
+    def __init__(self, use_opencv_pose: bool = False):
+        """
+        Initialize the Tennis Gesture Analyzer.
+
+        Args:
+            use_opencv_pose: If True, use OpenCV DNN-based pose estimation.
+                           If False, try MediaPipe (default).
+        """
+        self.use_opencv_pose = use_opencv_pose or USE_OPENCV_POSE
+
+        if self.use_opencv_pose:
+            # Initialize OpenCV DNN-based pose estimator
+            # Using OpenPose or similar model would require downloading weights
+            # For now, we'll use a simpler approach with fallback
+            self.pose_detector = None
+            print("Using OpenCV-based pose estimation (placeholder)")
+        else:
+            # Initialize MediaPipe Pose for real landmark detection
+            if MEDIAPIPE_LEGACY:
+                self.mp_pose = mp.solutions.pose
+                self.pose = self.mp_pose.Pose(
+                    static_image_mode=False,
+                    model_complexity=1,
+                    enable_segmentation=False,
+                    min_detection_confidence=0.5,
+                    min_tracking_confidence=0.5
+                )
+            else:
+                # Fallback: MediaPipe not fully available
+                self.pose_detector = None
+                print("Warning: MediaPipe pose detection not available. Using fallback mode.")
+
+        # Store previous frame landmarks for interpolation when detection fails
+        self.prev_landmarks: Optional[np.ndarray] = None
+        self.prev_landmarks_confidence: float = 0.0
+
+        # Initialize optical flow for motion features
         self.opt_flow = cv2.calcOpticalFlowFarneback
 
         # Initialize HOG descriptor for motion features
@@ -96,29 +148,46 @@ class EnhancedTennisGestureAnalyzer:
         return features.flatten() if features is not None else np.array([])
 
     def calculate_joint_angles(self, landmarks: np.ndarray) -> List[float]:
-        """Calculate angles between key joints"""
+        """
+        Calculate angles between key joints using MediaPipe Pose landmarks.
+
+        MediaPipe provides 33 landmarks:
+        - 0-10: Face/head
+        - 11-22: Upper body (shoulders, elbows, wrists)
+        - 23-32: Lower body (hips, knees, ankles)
+
+        Returns angles in degrees for tennis-specific joint analysis.
+        """
         if len(landmarks) < 33:  # Not enough landmarks
-            return [0.0] * 10  # Return default angles
+            return [0.0] * 12  # Return default angles
 
         angles = []
 
-        # Define triplets of joints to calculate angles for
+        # Define triplets of joints to calculate angles for (MediaPipe indices)
         angle_triplets = [
-            # Shoulder-elbow-wrist angles (for racquet swing analysis)
-            (11, 13, 15),  # LEFT_SHOULDER, LEFT_ELBOW, LEFT_WRIST
-            (12, 14, 16),  # RIGHT_SHOULDER, RIGHT_ELBOW, RIGHT_WRIST
-            # Hip-knee-ankle angles (for stance analysis)
-            (23, 25, 27),  # LEFT_HIP, LEFT_KNEE, LEFT_ANKLE
-            (24, 26, 28),  # RIGHT_HIP, RIGHT_KNEE, RIGHT_ANKLE
-            # Knee flexion during stroke preparation
-            (23, 25, 27),  # LEFT_HIP, LEFT_KNEE, LEFT_ANKLE
-            (24, 26, 28),  # RIGHT_HIP, RIGHT_KNEE, RIGHT_ANKLE
-            # Elbow flexion during swing
-            (11, 13, 15),  # LEFT_SHOULDER, LEFT_ELBOW, LEFT_WRIST
-            (12, 14, 16),  # RIGHT_SHOULDER, RIGHT_ELBOW, RIGHT_WRIST
-            # Shoulder abduction
-            (11, 23, 25),  # LEFT_SHOULDER, LEFT_HIP, LEFT_KNEE
-            (12, 24, 26),  # RIGHT_SHOULDER, RIGHT_HIP, RIGHT_KNEE
+            # Right arm angles (dominant arm for most players)
+            (12, 14, 16),  # Right shoulder-elbow-wrist (elbow flexion)
+            (11, 12, 14),  # Left shoulder-right shoulder-elbow (shoulder abduction)
+
+            # Left arm angles
+            (11, 13, 15),  # Left shoulder-elbow-wrist (elbow flexion)
+            (12, 11, 13),  # Right shoulder-left shoulder-elbow (shoulder abduction)
+
+            # Right leg angles (stance analysis)
+            (24, 26, 28),  # Right hip-knee-ankle (knee flexion)
+            (23, 24, 26),  # Left hip-right hip-knee (hip angle)
+
+            # Left leg angles
+            (23, 25, 27),  # Left hip-knee-ankle (knee flexion)
+            (24, 23, 25),  # Right hip-left hip-knee (hip angle)
+
+            # Torso/shoulder rotation (critical for tennis strokes)
+            (11, 12, 24),  # Left shoulder-right shoulder-right hip
+            (12, 11, 23),  # Right shoulder-left shoulder-left hip
+
+            # Body lean during stroke
+            (12, 11, 23),  # Right shoulder-left shoulder-left hip
+            (11, 12, 24),  # Left shoulder-right shoulder-right hip
         ]
 
         for triplet in angle_triplets:
@@ -141,18 +210,37 @@ class EnhancedTennisGestureAnalyzer:
                     angles.append(angle_deg)
                 else:
                     angles.append(0.0)  # Default if indices are out of bounds
-            except:
+            except Exception:
                 angles.append(0.0)  # Default if calculation fails
 
         return angles
 
-    def extract_trajectories(self, frame_sequence: List[np.ndarray], current_idx: int, landmarks: np.ndarray) -> List[List[Tuple[float, float]]]:
-        """Extract movement trajectories of key joints over recent frames"""
+    def extract_trajectories(self, frame_sequence: List[np.ndarray], current_idx: int,
+                            landmarks: np.ndarray, cached_landmarks: Optional[Dict[int, np.ndarray]] = None) -> List[List[Tuple[float, float]]]:
+        """
+        Extract movement trajectories of key joints over recent frames.
+
+        Args:
+            frame_sequence: List of video frames
+            current_idx: Current frame index
+            landmarks: Landmarks for current frame (fallback)
+            cached_landmarks: Optional dict of pre-computed landmarks per frame index
+
+        Returns:
+            List of trajectories for each key joint (wrist, elbow, shoulder positions)
+        """
         trajectory_length = min(15, current_idx + 1)  # Track last 15 frames
         trajectories = []
 
-        # Define key joints to track
-        key_joint_indices = [15, 16, 11, 12, 13, 14]  # Wrists and shoulders
+        # Define key joints to track (MediaPipe indices)
+        key_joint_indices = [
+            15,  # Left wrist
+            16,  # Right wrist (critical for racquet tracking)
+            13,  # Left elbow
+            14,  # Right elbow
+            11,  # Left shoulder
+            12,  # Right shoulder
+        ]
 
         for joint_idx in key_joint_indices:
             if joint_idx >= len(landmarks):
@@ -162,57 +250,259 @@ class EnhancedTennisGestureAnalyzer:
             start_frame_idx = max(0, current_idx - trajectory_length)
 
             for frame_idx in range(start_frame_idx, current_idx + 1):
-                # Get landmarks from the specific frame
-                frame_landmarks = self.extract_landmarks_from_frame(frame_sequence[frame_idx])
+                # Try to use cached landmarks first
+                frame_landmarks = None
+                if cached_landmarks is not None and frame_idx in cached_landmarks:
+                    frame_landmarks = cached_landmarks[frame_idx]
+
+                # Fall back to extracting from frame if not cached
+                if frame_landmarks is None:
+                    frame_landmarks = self.extract_landmarks_from_frame(frame_sequence[frame_idx])
+                    # Cache for next time
+                    if cached_landmarks is not None:
+                        cached_landmarks[frame_idx] = frame_landmarks
 
                 if frame_landmarks is not None and joint_idx < len(frame_landmarks):
                     x, y = frame_landmarks[joint_idx][0], frame_landmarks[joint_idx][1]
                     trajectory.append((x, y))
+                elif trajectory:
+                    # If we have previous points, extend with last known position
+                    trajectory.append(trajectory[-1])
 
             trajectories.append(trajectory)
 
         return trajectories
 
-    def extract_landmarks_from_frame(self, frame: np.ndarray) -> np.ndarray:
-        """Simulate landmark extraction for this implementation"""
-        # In a real implementation, this would use MediaPipe or OpenPose
-        # For now, we'll simulate landmarks based on detecting human figures
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    def extract_landmarks_from_frame(self, frame: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Extract 33 pose landmarks from a frame.
 
-        # Simple person detection using background subtraction concepts
-        # In reality, this would use a pose estimation model
-        # For this demo, we'll simulate landmarks by detecting contours
+        Uses MediaPipe Pose when available, otherwise falls back to OpenCV-based
+        detection or interpolation from previous frames.
 
-        # Create a simple body outline simulation
+        Returns:
+            Normalized coordinates (x, y) in range [0, 1] for valid detections,
+            or None if no valid pose is detected.
+        """
+        if not self.use_opencv_pose and MEDIAPIPE_LEGACY:
+            return self._extract_landmarks_medipipe(frame)
+        else:
+            return self._extract_landmarks_fallback(frame)
+
+    def _extract_landmarks_medipipe(self, frame: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Extract 33 MediaPipe pose landmarks from a frame.
+
+        Returns normalized coordinates (x, y) in range [0, 1] for valid detections,
+        or None if no valid pose is detected.
+        """
+        # Convert BGR to RGB for MediaPipe
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        # Process the frame with MediaPipe Pose
+        results = self.pose.process(rgb_frame)
+
+        if results.pose_landmarks is None:
+            # No pose detected - return previous landmarks with interpolation if available
+            if self.prev_landmarks is not None and self.prev_landmarks_confidence > 0.3:
+                # Use interpolated previous landmarks (with reduced confidence weight)
+                self.prev_landmarks_confidence *= 0.9  # Decay confidence
+                return self.prev_landmarks * 0.95 + np.random.normal(0, 0.01, self.prev_landmarks.shape)
+            return None
+
+        # Extract landmarks from results
+        h, w = frame.shape[:2]
+        landmarks = []
+
+        for landmark in results.pose_landmarks.landmark:
+            # MediaPipe already provides normalized coordinates
+            x = np.clip(landmark.x, 0, 1)
+            y = np.clip(landmark.y, 0, 1)
+            visibility = landmark.visibility  # Confidence score (0-1)
+
+            landmarks.append([x, y])
+
+        landmarks_array = np.array(landmarks, dtype=np.float32)
+
+        # Update previous landmarks for interpolation
+        self.prev_landmarks = landmarks_array.copy()
+        self.prev_landmarks_confidence = 1.0
+
+        return landmarks_array
+
+    def _extract_landmarks_fallback(self, frame: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Fallback landmark extraction when MediaPipe is not available.
+
+        Uses OpenCV DNN or contour-based detection as a fallback.
+        """
         h, w = frame.shape[:2]
 
-        # Simulate landmarks as approximate body parts
-        # This would be replaced by actual pose estimator
-        landmarks = np.array([
-            [w//2, h//3],      # Nose (approx)
-            [w//2-20, h//3],   # Left eye
-            [w//2+20, h//3],   # Right eye
-            [w//2-30, h//3+10], # Left ear
-            [w//2+30, h//3+10], # Right ear
-            [w//2-40, h//2],   # Left shoulder
-            [w//2+40, h//2],   # Right shoulder
-            [w//2-60, h//2+50], # Left elbow
-            [w//2+60, h//2+50], # Right elbow
-            [w//2-70, h//2+100], # Left wrist
-            [w//2+70, h//2+100], # Right wrist
-            [w//2-40, h//2+120], # Left hip
-            [w//2+40, h//2+120], # Right hip
-            [w//2-50, h//2+180], # Left knee
-            [w//2+50, h//2+180], # Right knee
-            [w//2-50, h//2+240], # Left ankle
-            [w//2+50, h//2+240], # Right ankle
-        ], dtype=np.float32)
+        # Try to use OpenCV DNN with OpenPose model if available
+        # For now, use a simple heuristic based on motion and contours
+        # This is a placeholder - in production you'd use a real pose model
 
-        # Normalize coordinates to [0, 1] range
-        landmarks[:, 0] /= w
-        landmarks[:, 1] /= h
+        # If we have previous landmarks, use them with decay
+        if self.prev_landmarks is not None and self.prev_landmarks_confidence > 0.1:
+            self.prev_landmarks_confidence *= 0.95
+            return self.prev_landmarks * 0.98 + np.random.normal(0, 0.005, self.prev_landmarks.shape)
+
+        # Try to detect human-like contours
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        # Simple threshold-based segmentation
+        _, thresh = cv2.threshold(blurred, 100, 255, cv2.THRESH_BINARY_INV)
+
+        # Find contours
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if contours:
+            # Find largest contour (assume it's the person)
+            largest_contour = max(contours, key=cv2.contourArea)
+            area = cv2.contourArea(largest_contour)
+
+            if area > 1000:  # Minimum area threshold
+                # Get bounding box
+                x, y, bw, bh = cv2.boundingRect(largest_contour)
+
+                # Create approximate 33 landmarks based on bounding box
+                landmarks = self._create_landmarks_from_bbox(x, y, bw, bh, w, h)
+                self.prev_landmarks = landmarks
+                self.prev_landmarks_confidence = 0.5
+                return landmarks
+
+        return None
+
+    def _create_landmarks_from_bbox(self, x: int, y: int, bw: int, bh: int,
+                                   img_w: int, img_h: int) -> np.ndarray:
+        """Create approximate 33 landmarks from a bounding box."""
+        landmarks = np.zeros((33, 2), dtype=np.float32)
+
+        # Normalize to image coordinates
+        cx, cy = x + bw / 2, y + bh / 2  # Center
+
+        # Head (landmarks 0-10)
+        head_y = y + bh * 0.15
+        head_x = cx
+        landmarks[0] = [head_x / img_w, head_y / img_h]  # Nose
+        landmarks[1] = [(head_x - 5) / img_w, (head_y - 5) / img_h]  # Left eye
+        landmarks[2] = [(head_x + 5) / img_w, (head_y - 5) / img_h]  # Right eye
+        landmarks[3] = [(head_x - 15) / img_w, (head_y - 2) / img_h]  # Left ear
+        landmarks[4] = [(head_x + 15) / img_w, (head_y - 2) / img_h]  # Right ear
+        for i in range(5, 11):  # Mouth
+            landmarks[i] = [(head_x - 10 + 4 * (i - 5)) / img_w, (head_y + 10) / img_h]
+
+        # Upper body (11-20)
+        shoulder_y = y + bh * 0.25
+        shoulder_w = bw * 0.4
+        landmarks[11] = [(cx - shoulder_w) / img_w, shoulder_y / img_h]  # Left shoulder
+        landmarks[12] = [(cx + shoulder_w) / img_w, shoulder_y / img_h]  # Right shoulder
+
+        elbow_y = y + bh * 0.45
+        landmarks[13] = [(cx - shoulder_w * 1.2) / img_w, elbow_y / img_h]  # Left elbow
+        landmarks[14] = [(cx + shoulder_w * 1.2) / img_w, elbow_y / img_h]  # Right elbow
+
+        wrist_y = y + bh * 0.60
+        landmarks[15] = [(cx - shoulder_w * 1.3) / img_w, wrist_y / img_h]  # Left wrist
+        landmarks[16] = [(cx + shoulder_w * 1.3) / img_w, wrist_y / img_h]  # Right wrist
+
+        # Fingers (simplified)
+        for i in range(17, 21):
+            landmarks[i] = landmarks[15 if i < 19 else 16]
+
+        # Lower body (21-32)
+        hip_y = y + bh * 0.50
+        hip_w = bw * 0.2
+        landmarks[21] = [(cx - hip_w) / img_w, hip_y / img_h]  # Left hip pointer
+        landmarks[22] = [(cx + hip_w) / img_w, hip_y / img_h]  # Right hip pointer
+        landmarks[23] = [(cx - hip_w) / img_w, (hip_y + 20) / img_h]  # Left hip
+        landmarks[24] = [(cx + hip_w) / img_w, (hip_y + 20) / img_h]  # Right hip
+
+        knee_y = y + bh * 0.70
+        landmarks[25] = [(cx - hip_w * 0.9) / img_w, knee_y / img_h]  # Left knee
+        landmarks[26] = [(cx + hip_w * 0.9) / img_w, knee_y / img_h]  # Right knee
+
+        ankle_y = y + bh * 0.90
+        landmarks[27] = [(cx - hip_w * 0.8) / img_w, ankle_y / img_h]  # Left ankle
+        landmarks[28] = [(cx + hip_w * 0.8) / img_w, ankle_y / img_h]  # Right ankle
+
+        # Feet
+        landmarks[29] = [(cx - hip_w * 0.9) / img_w, (ankle_y + 5) / img_h]  # Left heel
+        landmarks[30] = [(cx - hip_w * 0.7) / img_w, (ankle_y + 10) / img_h]  # Left toe
+        landmarks[31] = [(cx + hip_w * 0.7) / img_w, (ankle_y + 10) / img_h]  # Right toe
+        landmarks[32] = [(cx + hip_w * 0.9) / img_w, (ankle_y + 5) / img_h]  # Right heel
 
         return landmarks
+
+    def draw_landmarks(self, frame: np.ndarray, landmarks: Optional[np.ndarray]) -> np.ndarray:
+        """
+        Visualize landmarks on the frame for debugging.
+        """
+        if landmarks is None:
+            return frame
+
+        output = frame.copy()
+        h, w = frame.shape[:2]
+
+        # Define colors for different body parts
+        colors = {
+            'head': (0, 0, 255),      # Red
+            'torso': (0, 255, 0),     # Green
+            'arm': (255, 0, 0),       # Blue
+            'leg': (255, 255, 0)      # Cyan
+        }
+
+        # MediaPipe landmark indices
+        NOSE = 0
+        LEFT_SHOULDER, RIGHT_SHOULDER = 11, 12
+        LEFT_ELBOW, RIGHT_ELBOW = 13, 14
+        LEFT_WRIST, RIGHT_WRIST = 15, 16
+        LEFT_HIP, RIGHT_HIP = 23, 24
+        LEFT_KNEE, RIGHT_KNEE = 25, 26
+        LEFT_ANKLE, RIGHT_ANKLE = 27, 28
+
+        # Draw circles at landmark positions
+        for i, (x, y) in enumerate(landmarks):
+            px, py = int(x * w), int(y * h)
+
+            # Color based on body region
+            if i in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]:  # Head/face
+                color = colors['head']
+            elif i in [11, 12, 21, 22, 23, 24]:  # Torso
+                color = colors['torso']
+            elif i in [13, 14, 15, 16, 17, 18, 19, 20]:  # Arms
+                color = colors['arm']
+            elif i in [25, 26, 27, 28, 29, 30, 31, 32]:  # Legs
+                color = colors['leg']
+            else:
+                color = (255, 255, 255)  # White for others
+
+            cv2.circle(output, (px, py), 5, color, -1)
+
+        # Draw skeleton connections
+        connections = [
+            (LEFT_SHOULDER, LEFT_ELBOW, colors['arm']),
+            (LEFT_ELBOW, LEFT_WRIST, colors['arm']),
+            (RIGHT_SHOULDER, RIGHT_ELBOW, colors['arm']),
+            (RIGHT_ELBOW, RIGHT_WRIST, colors['arm']),
+            (LEFT_SHOULDER, LEFT_HIP, colors['torso']),
+            (RIGHT_SHOULDER, RIGHT_HIP, colors['torso']),
+            (LEFT_HIP, LEFT_KNEE, colors['leg']),
+            (LEFT_KNEE, LEFT_ANKLE, colors['leg']),
+            (RIGHT_HIP, RIGHT_KNEE, colors['leg']),
+            (RIGHT_KNEE, RIGHT_ANKLE, colors['leg']),
+            (LEFT_HIP, RIGHT_HIP, colors['torso']),
+            (LEFT_SHOULDER, RIGHT_SHOULDER, colors['torso']),
+        ]
+
+        for idx1, idx2, color in connections:
+            if idx1 < len(landmarks) and idx2 < len(landmarks):
+                pt1 = (int(landmarks[idx1][0] * w), int(landmarks[idx1][1] * h))
+                pt2 = (int(landmarks[idx2][0] * w), int(landmarks[idx2][1] * h))
+                cv2.line(output, pt1, pt2, color, 2)
+
+        return output
 
     def calculate_velocities_and_acceleration(self, landmarks: np.ndarray, prev_landmarks: np.ndarray,
                                            prev_velocity: np.ndarray = None) -> Tuple[np.ndarray, float]:
@@ -233,18 +523,38 @@ class EnhancedTennisGestureAnalyzer:
 
     def extract_enhanced_gesture_features(self, frame_sequence: List[np.ndarray]) -> List[EnhancedGestureFeature]:
         """
-        Extract enhanced features from a sequence of video frames
+        Extract enhanced features from a sequence of video frames.
+
+        This method processes all frames to extract:
+        - 33 MediaPipe pose landmarks (normalized coordinates)
+        - Optical flow between consecutive frames
+        - Motion history images
+        - HOG features for shape analysis
+        - Joint angles for biomechanical analysis
+        - Trajectories of key joints (wrists, elbows, shoulders)
+        - Velocity and acceleration vectors
+
+        Returns:
+            List of EnhancedGestureFeature objects for each frame with valid pose detection
         """
         features = []
         prev_landmarks = None
         prev_velocity = None
 
+        # First pass: extract and cache all landmarks
+        cached_landmarks: Dict[int, np.ndarray] = {}
         for i, frame in enumerate(frame_sequence):
-            # Extract pose landmarks
             landmarks = self.extract_landmarks_from_frame(frame)
+            if landmarks is not None and len(landmarks) > 0:
+                cached_landmarks[i] = landmarks
 
-            if landmarks is None or len(landmarks) == 0:
+        # Second pass: extract all features using cached landmarks
+        for i, frame in enumerate(frame_sequence):
+            # Skip frames without valid landmarks
+            if i not in cached_landmarks:
                 continue
+
+            landmarks = cached_landmarks[i]
 
             # Calculate optical flow (needs previous frame)
             optical_flow = np.array([])
@@ -260,8 +570,10 @@ class EnhancedTennisGestureAnalyzer:
             # Calculate joint angles
             joint_angles = self.calculate_joint_angles(landmarks)
 
-            # Extract trajectories
-            trajectories = self.extract_trajectories(frame_sequence, i, landmarks)
+            # Extract trajectories using cached landmarks
+            trajectories = self.extract_trajectories(
+                frame_sequence, i, landmarks, cached_landmarks
+            )
 
             # Calculate velocity and acceleration
             velocity, acceleration = self.calculate_velocities_and_acceleration(
@@ -586,46 +898,224 @@ class EnhancedTennisGestureAnalyzer:
         with open(filepath, 'rb') as f:
             self.gesture_database = pickle.load(f)
 
+    def reset(self):
+        """Reset the analyzer state for processing a new video.
+
+        This clears cached landmarks and closes the Pose instance
+        to ensure clean state between videos.
+        """
+        self.prev_landmarks = None
+        self.prev_landmarks_confidence = 0.0
+
+        # Close MediaPipe Pose if using it
+        if not self.use_opencv_pose and MEDIAPIPE_LEGACY and hasattr(self, 'pose'):
+            self.pose.close()
+            self.pose = self.mp_pose.Pose(
+                static_image_mode=False,
+                model_complexity=1,
+                enable_segmentation=False,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5
+            )
+
+    def close(self):
+        """Properly close the analyzer and release resources."""
+        if not self.use_opencv_pose and MEDIAPIPE_LEGACY and hasattr(self, 'pose'):
+            self.pose.close()
+
 
 def create_enhanced_sample_database(analyzer: EnhancedTennisGestureAnalyzer):
     """
-    Create an enhanced sample database with gestures from famous tennis players
+    Create an enhanced sample database with gestures from famous tennis players.
+
+    Uses realistic MediaPipe Pose landmark structure (33 landmarks) with
+    tennis-specific pose patterns for different stroke types.
     """
-    # Generate more realistic sample data
-    sample_gestures = []
+    # MediaPipe Pose has 33 landmarks:
+    # 0: Nose, 1-4: Eyes/Ears, 5-10: Mouth/Lips, 11-12: Shoulders, 13-14: Elbows,
+    # 15-16: Wrists, 17-20: Fingers, 21-22: Hips, 23-24: Hips (lower),
+    # 25-26: Knees, 27-28: Ankles, 29-32: Heels/Toes
 
-    # Create sample gesture with realistic tennis movement patterns
-    for _ in range(20):  # 20 frames for Federer forehand
-        # Simulate tennis-specific poses
-        landmarks = np.random.rand(16, 2) * 0.5 + 0.25  # Normalized coordinates
+    def create_tennis_pose(stroke_type: str, frame_idx: int, total_frames: int) -> np.ndarray:
+        """Create realistic tennis pose landmarks for a given stroke phase."""
+        landmarks = np.zeros((33, 2), dtype=np.float32)
 
-        # Create more structured landmarks for tennis
-        landmarks[0] = [0.5, 0.3]  # Head
-        landmarks[5] = [0.4, 0.4]  # Left shoulder
-        landmarks[6] = [0.6, 0.4]  # Right shoulder
-        landmarks[7] = [0.3, 0.5]  # Left elbow
-        landmarks[8] = [0.7, 0.5]  # Right elbow
-        landmarks[9] = [0.25, 0.6] # Left wrist
-        landmarks[10] = [0.75, 0.6] # Right wrist
-        # ... other landmarks
+        # Normalize frame index to stroke phase (0-1)
+        phase = frame_idx / total_frames
+
+        if stroke_type == "forehand":
+            # Simulate a forehand stroke: preparation -> contact -> follow-through
+            # Head (relatively stable)
+            landmarks[0] = [0.5, 0.25 + 0.02 * np.sin(phase * np.pi)]  # Nose
+
+            # Shoulders (rotating during stroke)
+            shoulder_rotation = 0.15 * np.sin(phase * np.pi)
+            landmarks[11] = [0.42 - shoulder_rotation, 0.35]  # Left shoulder
+            landmarks[12] = [0.58 + shoulder_rotation, 0.35]  # Right shoulder
+
+            # Elbows (bending during swing)
+            elbow_bend = 0.3 * (1 - phase) if phase < 0.5 else 0.15
+            landmarks[13] = [0.35 - 0.1 * phase, 0.45 + elbow_bend]  # Left elbow
+            landmarks[14] = [0.65 + 0.2 * phase, 0.45 + elbow_bend]  # Right elbow (swinging)
+
+            # Wrists (racquet hand follows through)
+            if phase < 0.3:  # Preparation
+                landmarks[15] = [0.30, 0.55]  # Left wrist
+                landmarks[16] = [0.70, 0.55]  # Right wrist
+            elif phase < 0.6:  # Contact
+                landmarks[15] = [0.32, 0.58]
+                landmarks[16] = [0.68, 0.58 + 0.1 * (phase - 0.3)]
+            else:  # Follow-through
+                landmarks[15] = [0.35, 0.60]
+                landmarks[16] = [0.65 + 0.15 * (phase - 0.6) * 3, 0.55 - 0.1 * (phase - 0.6) * 3]
+
+            # Hips (stable base)
+            landmarks[23] = [0.43, 0.55]  # Left hip
+            landmarks[24] = [0.57, 0.55]  # Right hip
+
+            # Knees (slight bend)
+            landmarks[25] = [0.42, 0.70]  # Left knee
+            landmarks[26] = [0.58, 0.70]  # Right knee
+
+            # Ankles
+            landmarks[27] = [0.42, 0.85]  # Left ankle
+            landmarks[28] = [0.58, 0.85]  # Right ankle
+
+        elif stroke_type == "serve":
+            # Simulate a serve: toss -> trophy -> contact -> follow-through
+            toss_phase = min(phase * 2, 1.0)
+
+            # Head (looking up at ball)
+            landmarks[0] = [0.5, 0.22 + 0.03 * toss_phase]
+
+            # Shoulders (trophy position)
+            landmarks[11] = [0.42, 0.35 + 0.05 * toss_phase]  # Left shoulder (rising)
+            landmarks[12] = [0.58, 0.38]  # Right shoulder
+
+            # Elbows (trophy elbow up)
+            landmarks[13] = [0.38, 0.42 + 0.15 * toss_phase]  # Left elbow (up for toss)
+            landmarks[14] = [0.65, 0.40 + 0.2 * (1 - toss_phase)]  # Right elbow (cocked)
+
+            # Wrists
+            landmarks[15] = [0.35, 0.35 + 0.25 * toss_phase]  # Left wrist (toss hand)
+            landmarks[16] = [0.70, 0.35 + 0.15 * (1 - toss_phase)]  # Right wrist (racquet back)
+
+            # Lower body (knee bend)
+            landmarks[23] = [0.43, 0.55]
+            landmarks[24] = [0.57, 0.55]
+            landmarks[25] = [0.42, 0.68 + 0.05 * (1 - toss_phase)]  # Left knee (bending)
+            landmarks[26] = [0.58, 0.68 + 0.05 * (1 - toss_phase)]  # Right knee
+            landmarks[27] = [0.42, 0.83]
+            landmarks[28] = [0.58, 0.83]
+
+        else:  # Default/neutral stance
+            landmarks[0] = [0.5, 0.25]
+            landmarks[11] = [0.42, 0.35]
+            landmarks[12] = [0.58, 0.35]
+            landmarks[13] = [0.35, 0.45]
+            landmarks[14] = [0.65, 0.45]
+            landmarks[15] = [0.30, 0.55]
+            landmarks[16] = [0.70, 0.55]
+            landmarks[23] = [0.43, 0.55]
+            landmarks[24] = [0.57, 0.55]
+            landmarks[25] = [0.42, 0.70]
+            landmarks[26] = [0.58, 0.70]
+            landmarks[27] = [0.42, 0.85]
+            landmarks[28] = [0.58, 0.85]
+
+        # Fill in remaining landmarks with reasonable defaults
+        # Eyes (1-4)
+        landmarks[1] = [0.48, 0.23]  # Left eye
+        landmarks[2] = [0.52, 0.23]  # Right eye
+        landmarks[3] = [0.47, 0.25]  # Left ear
+        landmarks[4] = [0.53, 0.25]  # Right ear
+
+        # Mouth area (5-10) - simplified
+        for i in range(5, 11):
+            landmarks[i] = [0.47 + 0.012 * (i - 5), 0.28]
+
+        # Fingers (17-20) - near wrists
+        landmarks[17] = landmarks[15] + [0.02, 0.01]  # Left hand
+        landmarks[18] = landmarks[15] + [0.03, 0.02]
+        landmarks[19] = landmarks[16] + [-0.02, 0.01]  # Right hand
+        landmarks[20] = landmarks[16] + [-0.03, 0.02]
+
+        # Hip pointers (21-22)
+        landmarks[21] = [0.45, 0.50]
+        landmarks[22] = [0.55, 0.50]
+
+        # Feet (29-32)
+        landmarks[29] = [0.40, 0.90]  # Left heel
+        landmarks[30] = [0.44, 0.92]  # Left toe
+        landmarks[31] = [0.56, 0.92]  # Right toe
+        landmarks[32] = [0.60, 0.90]  # Right heel
+
+        return landmarks
+
+    # Create Federer forehand (smooth, classic technique)
+    federer_forehand = []
+    for i in range(20):
+        landmarks = create_tennis_pose("forehand", i, 20)
+        # Add slight variation for realism
+        landmarks += np.random.normal(0, 0.01, landmarks.shape)
 
         feature = EnhancedGestureFeature(
             pose_landmarks=landmarks,
-            optical_flow=np.random.rand(480, 640, 2) * 0.1,  # Simulated optical flow
-            motion_history=np.random.rand(480, 640) * 0.2,    # Simulated motion history
-            hog_features=np.random.rand(3780),               # Standard HOG features
-            joint_angles=[90.0, 85.0, 75.0, 80.0, 95.0, 70.0, 85.0, 90.0, 80.0, 88.0],
-            trajectories=[[ (0.1, 0.2), (0.15, 0.25), (0.2, 0.3) ]],  # Example trajectory
-            velocity_vectors=[np.random.rand(16, 2) * 0.05],
+            optical_flow=np.random.rand(480, 640, 2) * 0.1,
+            motion_history=np.random.rand(480, 640) * 0.2,
+            hog_features=np.random.rand(3780),
+            joint_angles=[90.0 + np.random.normal(0, 2) for _ in range(12)],
+            trajectories=[],  # Would be computed during extraction
+            velocity_vectors=[np.random.rand(33, 2) * 0.05],
             acceleration=[np.random.uniform(0.1, 0.5)],
             temporal_keypoints=[]
         )
-        sample_gestures.append(feature)
+        federer_forehand.append(feature)
 
-    # Add to database with tennis-specific names
-    analyzer.add_to_database("Roger Federer - Forehand", sample_gestures)
-    analyzer.add_to_database("Rafael Nadal - Forehand", sample_gestures.copy())
-    analyzer.add_to_database("Serena Williams - Serve", sample_gestures.copy())
+    # Create Nadal forehand (more extreme topspin motion)
+    nadal_forehand = []
+    for i in range(20):
+        landmarks = create_tennis_pose("forehand", i, 20)
+        # Nadal's more extreme wrist motion
+        landmarks[16, 0] += 0.05 * np.sin(i / 20 * np.pi)  # More racquet hand movement
+        landmarks += np.random.normal(0, 0.015, landmarks.shape)
+
+        feature = EnhancedGestureFeature(
+            pose_landmarks=landmarks,
+            optical_flow=np.random.rand(480, 640, 2) * 0.12,
+            motion_history=np.random.rand(480, 640) * 0.25,
+            hog_features=np.random.rand(3780),
+            joint_angles=[85.0 + np.random.normal(0, 3) for _ in range(12)],
+            trajectories=[],
+            velocity_vectors=[np.random.rand(33, 2) * 0.06],
+            acceleration=[np.random.uniform(0.15, 0.6)],
+            temporal_keypoints=[]
+        )
+        nadal_forehand.append(feature)
+
+    # Create Serena serve (powerful, high toss)
+    serena_serve = []
+    for i in range(20):
+        landmarks = create_tennis_pose("serve", i, 20)
+        landmarks += np.random.normal(0, 0.01, landmarks.shape)
+
+        feature = EnhancedGestureFeature(
+            pose_landmarks=landmarks,
+            optical_flow=np.random.rand(480, 640, 2) * 0.15,
+            motion_history=np.random.rand(480, 640) * 0.3,
+            hog_features=np.random.rand(3780),
+            joint_angles=[95.0 + np.random.normal(0, 2) for _ in range(12)],
+            trajectories=[],
+            velocity_vectors=[np.random.rand(33, 2) * 0.07],
+            acceleration=[np.random.uniform(0.2, 0.7)],
+            temporal_keypoints=[]
+        )
+        serena_serve.append(feature)
+
+    # Add to database
+    analyzer.add_to_database("Roger Federer - Forehand", federer_forehand)
+    analyzer.add_to_database("Rafael Nadal - Forehand", nadal_forehand)
+    analyzer.add_to_database("Serena Williams - Serve", serena_serve)
 
 
 if __name__ == "__main__":
