@@ -17,8 +17,162 @@ import numpy as np
 import argparse
 import sys
 import os
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 from enhanced_gesture_analyzer import EnhancedTennisGestureAnalyzer, MEDIAPIPE_LEGACY
+
+
+class PersonDetector:
+    """
+    Detect person in frame using motion cues.
+    Optimized for tennis video - detects the ACTIVE player only.
+
+    Key insight: Tennis players create motion throughout their body during
+    swings. Static observers create minimal motion. We detect the largest
+    coherent motion region that has person-like proportions.
+    """
+
+    def __init__(self):
+        self.prev_gray = None
+        self.prev_bbox = None
+        self.frames_without_detection = 0
+
+    def detect_person(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int, float]]:
+        """
+        Detect the ACTIVE tennis player using frame differencing.
+
+        Returns:
+            (x, y, w, h, confidence) or None if no person detected
+        """
+        height, width = frame.shape[:2]
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        # Need at least 2 frames for differencing
+        if self.prev_gray is None:
+            self.prev_gray = gray
+            return None
+
+        # Frame differencing with LOW threshold to capture all motion
+        frame_diff = cv2.absdiff(self.prev_gray, gray)
+        _, diff_mask = cv2.threshold(frame_diff, 25, 255, cv2.THRESH_BINARY)
+
+        # Optical flow for additional motion signal
+        flow = cv2.calcOpticalFlowFarneback(
+            self.prev_gray, gray, None,
+            pyr_scale=0.5, levels=3, winsize=15,
+            iterations=3, poly_n=5, poly_sigma=1.2, flags=0
+        )
+        magnitude, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+        mag_norm = cv2.normalize(magnitude, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        _, flow_mask = cv2.threshold(mag_norm, 40, 255, cv2.THRESH_BINARY)
+
+        # Combine masks - union of both methods
+        combined = cv2.bitwise_or(diff_mask, flow_mask)
+
+        # Morphological cleanup - close gaps to connect motion fragments
+        # Use larger kernel and more iterations to connect fragmented motion
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel, iterations=2)
+        combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, kernel, iterations=1)
+
+        # Find ALL contours
+        contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        best_bbox = None
+        best_score = 0
+
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            # Minimum area: 0.5% of frame (was 2%, too restrictive)
+            min_area = width * height * 0.003
+
+            if area < min_area:
+                continue
+
+            x, y, w, h = cv2.boundingRect(contour)
+            center_x, center_y = x + w/2, y + h/2
+
+            # Person-like aspect ratio (was 0.8-2.2, now 0.5-2.5 to include swinging)
+            aspect_ratio = h / max(w, 1)
+            if aspect_ratio < 0.4 or aspect_ratio > 3.0:
+                continue
+
+            # Width filter - but more lenient (was 35%, now 50%)
+            if w > width * 0.6:
+                continue
+
+            # Define zones for bias calculation
+            zone_width = width // 3
+
+            # Determine zone
+            if center_x < zone_width:
+                contour_zone = 'LEFT'
+            elif center_x < zone_width * 2:
+                contour_zone = 'CENTER'
+            else:
+                contour_zone = 'RIGHT'
+
+            # Calculate motion intensity in this region from flow
+            roi_flow = mag_norm[y:y+h, x:x+w]
+            avg_motion = np.mean(roi_flow) if roi_flow.size > 0 else 0
+
+            # Motion density
+            motion_pixels = cv2.countNonZero(roi_flow)
+            motion_density = motion_pixels / roi_flow.size if roi_flow.size > 0 else 0
+
+            # Base motion score
+            motion_score = (avg_motion / 255) * 0.5 + motion_density * 0.5
+
+            # Center preference (active player tends to be center-court)
+            center_bonus = 1.0 - abs(center_x - width/2) / (width/2)
+
+            # STRONG zone bias - tennis player is almost always in CENTER zone
+            # This prevents false positives on static observers on the sides
+            zone_bias = 0.0
+            if contour_zone == 'CENTER':
+                zone_bias = 0.5  # 50% bonus for CENTER zone
+            elif contour_zone == 'LEFT':
+                zone_bias = -0.3  # 30% penalty for LEFT zone
+
+            # Prefer bounding boxes that start in upper-middle (where players are)
+            y_position_score = 1.0 if y < height * 0.7 else 0.5
+
+            # Combined score
+            score = area * motion_score * (1 + 0.5 * center_bonus + zone_bias) * y_position_score
+
+            # Temporal consistency - prefer bbox near previous detection
+            if self.prev_bbox:
+                px, py, pw, ph, _ = self.prev_bbox[:5]
+                prev_center_x = px + pw/2
+                prev_center_y = py + ph/2
+                dist = np.sqrt((center_x - prev_center_x)**2 + (center_y - prev_center_y)**2)
+                if dist < 250:
+                    score *= 1.3
+
+            if score > best_score:
+                best_score = score
+                best_bbox = (x, y, w, h)
+
+        # Return best detection
+        if best_bbox:
+            x, y, w, h = best_bbox
+            self.frames_without_detection = 0
+            confidence = min(1.0, best_score / (width * height * 0.05))
+            self.prev_bbox = (x, y, w, h, confidence)
+            self.prev_gray = gray
+            return (x, y, w, h, confidence)
+
+        # Fallback: if no motion detected, don't return stale bbox
+        # Let the pose estimation work without a prior
+        self.frames_without_detection += 1
+
+        # Clear previous bbox after 5 frames without detection
+        # This prevents stale landmarks from persisting
+        if self.frames_without_detection > 5:
+            self.prev_bbox = None
+
+        self.prev_gray = gray
+        return None
 
 
 class PoseOverlayProcessor:
@@ -47,7 +201,7 @@ class PoseOverlayProcessor:
         'generic': (255, 255, 255)     # White
     }
 
-    # Landmark connections (skeleton structure)
+    # Landmark connections (MediaPipe format)
     CONNECTIONS = [
         # Head
         (0, 1, 'nose'),      # Nose to left eye
@@ -103,6 +257,9 @@ class PoseOverlayProcessor:
         self.landmark_radius = landmark_radius
         self.line_thickness = line_thickness
 
+        # Initialize person detector
+        self.person_detector = PersonDetector()
+
         # Initialize gesture analyzer for pose detection
         self.analyzer = EnhancedTennisGestureAnalyzer()
 
@@ -142,8 +299,23 @@ class PoseOverlayProcessor:
         # Create output writer if output path provided
         out = None
         if output_path:
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            # Try H.264 codec first (best compatibility), fall back to mp4v
+            fourcc_h264 = cv2.VideoWriter_fourcc(*'avc1')
+            fourcc_mp4v = cv2.VideoWriter_fourcc(*'mp4v')
+
+            # Test if H.264 is available
+            test_writer = cv2.VideoWriter("/tmp/test_codec.mp4", fourcc_h264, fps, (width, height))
+            if test_writer.isOpened():
+                test_writer.release()
+                fourcc = fourcc_h264
+                codec_name = 'H.264 (avc1)'
+            else:
+                fourcc = fourcc_mp4v
+                codec_name = 'MPEG-4 (mp4v)'
+                print(f"Note: H.264 not available, using {codec_name}")
+
             out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+            print(f"Output codec: {codec_name}")
 
         # Store landmarks for each frame
         all_landmarks = []
@@ -154,18 +326,24 @@ class PoseOverlayProcessor:
             if not ret:
                 break
 
-            # Extract landmarks from frame
-            landmarks = self.analyzer.extract_landmarks_from_frame(frame)
+            # Detect person in frame
+            person_bbox = self.person_detector.detect_person(frame)
+
+            # Extract landmarks from frame with person location
+            landmarks = self.analyzer.extract_landmarks_from_frame(
+                frame, person_bbox=person_bbox
+            )
 
             # Store landmarks
             all_landmarks.append({
                 'frame': frame_count,
                 'landmarks': landmarks.copy() if landmarks is not None else None,
-                'detected': landmarks is not None
+                'detected': landmarks is not None,
+                'person_bbox': person_bbox
             })
 
-            # Create overlay if we have landmarks or for visualization
-            overlay = self.overlay_landmarks(frame, landmarks, frame_count)
+            # Create overlay
+            overlay = self.overlay_landmarks(frame, landmarks, frame_count, person_bbox)
 
             # Write to output
             if out is not None:
@@ -191,7 +369,7 @@ class PoseOverlayProcessor:
         return all_landmarks
 
     def overlay_landmarks(self, frame: np.ndarray, landmarks: Optional[np.ndarray],
-                         frame_num: int = 0) -> np.ndarray:
+                         frame_num: int = 0, person_bbox: Optional[Tuple] = None) -> np.ndarray:
         """
         Overlay pose landmarks on a frame.
 
@@ -199,12 +377,20 @@ class PoseOverlayProcessor:
             frame: Input frame (BGR)
             landmarks: 33x2 array of normalized landmarks (or None)
             frame_num: Frame number for display
+            person_bbox: Optional (x, y, w, h, confidence) tuple
 
         Returns:
             Frame with overlaid pose visualization
         """
         output = frame.copy()
         height, width = output.shape[:2]
+
+        # Draw person detection bounding box
+        if person_bbox:
+            x, y, bw, bh, conf = person_bbox
+            cv2.rectangle(output, (x, y), (x + bw, y + bh), (0, 255, 255), 2)
+            cv2.putText(output, f"Person: {conf:.1%}", (x, y - 5),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
         # Add frame info overlay
         info_bg = np.zeros_like(output)
@@ -390,6 +576,8 @@ Examples:
 
     except Exception as e:
         print(f"\nError during processing: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
     finally:

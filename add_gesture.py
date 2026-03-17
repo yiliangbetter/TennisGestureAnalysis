@@ -15,7 +15,7 @@ def extract_gesture_from_video(video_path: str, gesture_name: str):
     Extract gesture data from a video and add it to the database
     """
     # Initialize analyzer
-    analyzer = TennisGestureAnalyzer()
+    analyzer = EnhancedTennisGestureAnalyzer()
 
     # Load existing database if it exists
     db_path = 'gesture_database.pkl'

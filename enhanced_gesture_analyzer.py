@@ -299,12 +299,18 @@ class EnhancedTennisGestureAnalyzer:
 
         return trajectories
 
-    def extract_landmarks_from_frame(self, frame: np.ndarray) -> Optional[np.ndarray]:
+    def extract_landmarks_from_frame(self, frame: np.ndarray,
+                                     person_bbox: Optional[Tuple[int, int, int, int, float]] = None
+                                     ) -> Optional[np.ndarray]:
         """
         Extract 33 pose landmarks from a frame.
 
         Uses MediaPipe Pose when available, otherwise falls back to OpenCV-based
-        detection or interpolation from previous frames.
+        detection using the provided person bounding box.
+
+        Args:
+            frame: Input frame (BGR)
+            person_bbox: Optional (x, y, w, h, confidence) tuple from person detector
 
         Returns:
             Normalized coordinates (x, y) in range [0, 1] for valid detections,
@@ -313,7 +319,7 @@ class EnhancedTennisGestureAnalyzer:
         if not self.use_opencv_pose and MEDIAPIPE_LEGACY:
             return self._extract_landmarks_medipipe(frame)
         else:
-            return self._extract_landmarks_fallback(frame)
+            return self._extract_landmarks_fallback(frame, person_bbox)
 
     def _extract_landmarks_medipipe(self, frame: np.ndarray) -> Optional[np.ndarray]:
         """
@@ -365,24 +371,61 @@ class EnhancedTennisGestureAnalyzer:
 
         return landmarks_array
 
-    def _extract_landmarks_fallback(self, frame: np.ndarray) -> Optional[np.ndarray]:
+    def _extract_landmarks_fallback(self, frame: np.ndarray,
+                                    person_bbox: Optional[Tuple[int, int, int, int, float]] = None
+                                    ) -> Optional[np.ndarray]:
         """
         Fallback landmark extraction when MediaPipe is not available.
 
-        Uses OpenCV DNN or contour-based detection as a fallback.
+        Uses the provided person bounding box for accurate landmark placement.
+
+        Args:
+            frame: Input frame (BGR)
+            person_bbox: Optional (x, y, w, h, confidence) tuple from person detector
+
+        Returns:
+            33x2 array of normalized landmarks or None
         """
         h, w = frame.shape[:2]
 
-        # Try to use OpenCV DNN with OpenPose model if available
-        # For now, use a simple heuristic based on motion and contours
-        # This is a placeholder - in production you'd use a real pose model
+        # Use provided person bounding box if available
+        if person_bbox is not None:
+            x, y, bw, bh, conf = person_bbox
 
-        # If we have previous landmarks, use them with decay
-        if self.prev_landmarks is not None and self.prev_landmarks_confidence > 0.1:
-            self.prev_landmarks_confidence *= 0.95
+            # Check if bbox position changed significantly from previous
+            if self.prev_landmarks is not None and len(self.prev_landmarks) > 0:
+                # Calculate previous center from landmarks
+                prev_center_x = np.mean(self.prev_landmarks[:, 0]) * w
+                prev_center_y = np.mean(self.prev_landmarks[:, 1]) * h
+                new_center_x = (x + bw / 2)
+                new_center_y = (y + bh / 2)
+
+                dist = np.sqrt((new_center_x - prev_center_x)**2 + (new_center_y - prev_center_y)**2)
+
+                # If bbox moved more than 200 pixels, reset landmarks (new person detected)
+                if dist > 200:
+                    self.prev_landmarks = None
+                    self.prev_landmarks_confidence = 0
+
+            # Create approximate 33 landmarks based on bounding box
+            landmarks = self._create_landmarks_from_bbox(x, y, bw, bh, w, h)
+            self.prev_landmarks = landmarks.copy()
+            self.prev_landmarks_confidence = conf * 0.8  # Scale confidence
+            return landmarks
+
+        # No bbox provided - decay confidence and return None if too low
+        if self.prev_landmarks is not None:
+            self.prev_landmarks_confidence *= 0.85  # Faster decay
+
+            # Stop using previous landmarks after 3 frames without detection
+            if self.prev_landmarks_confidence < 0.3:
+                self.prev_landmarks = None
+                self.prev_landmarks_confidence = 0
+                return None
+
             return self.prev_landmarks * 0.98 + np.random.normal(0, 0.005, self.prev_landmarks.shape)
 
-        # Try to detect human-like contours
+        # Try to detect human-like contours as last resort
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
 
