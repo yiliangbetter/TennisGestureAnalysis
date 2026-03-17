@@ -29,12 +29,19 @@ class PersonDetector:
     Key insight: Tennis players create motion throughout their body during
     swings. Static observers create minimal motion. We detect the largest
     coherent motion region that has person-like proportions.
+
+    IMPROVED: Uses contour merging to connect fragmented motion from the
+    active player, and multi-frame motion accumulation for robust detection.
     """
 
     def __init__(self):
         self.prev_gray = None
         self.prev_bbox = None
         self.frames_without_detection = 0
+        # Motion accumulation for multi-frame analysis
+        self.motion_accumulator = None
+        self.accumulation_count = 0
+        self.max_accumulation_frames = 5
 
     def detect_person(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int, float]]:
         """
@@ -52,9 +59,9 @@ class PersonDetector:
             self.prev_gray = gray
             return None
 
-        # Frame differencing with LOW threshold to capture all motion
+        # Frame differencing with adaptive threshold
         frame_diff = cv2.absdiff(self.prev_gray, gray)
-        _, diff_mask = cv2.threshold(frame_diff, 25, 255, cv2.THRESH_BINARY)
+        _, diff_mask = cv2.threshold(frame_diff, 20, 255, cv2.THRESH_BINARY)
 
         # Optical flow for additional motion signal
         flow = cv2.calcOpticalFlowFarneback(
@@ -64,27 +71,48 @@ class PersonDetector:
         )
         magnitude, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
         mag_norm = cv2.normalize(magnitude, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-        _, flow_mask = cv2.threshold(mag_norm, 40, 255, cv2.THRESH_BINARY)
+        _, flow_mask = cv2.threshold(mag_norm, 35, 255, cv2.THRESH_BINARY)
 
         # Combine masks - union of both methods
         combined = cv2.bitwise_or(diff_mask, flow_mask)
 
-        # Morphological cleanup - close gaps to connect motion fragments
-        # Use larger kernel and more iterations to connect fragmented motion
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel, iterations=2)
-        combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, kernel, iterations=1)
+        # Accumulate motion over multiple frames for more complete player silhouette
+        if self.motion_accumulator is None:
+            self.motion_accumulator = combined.astype(np.float32)
+        else:
+            # Add new motion with decay
+            self.motion_accumulator = self.motion_accumulator * 0.7 + combined.astype(np.float32) * 0.3
+        self.accumulation_count += 1
 
-        # Find ALL contours
-        contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Use accumulated motion for contour detection
+        accumulated_motion = np.clip(self.motion_accumulator, 0, 255).astype(np.uint8)
+        _, accumulated_mask = cv2.threshold(accumulated_motion, 80, 255, cv2.THRESH_BINARY)
+
+        # MORPHOLOGICAL MERGING: Use very aggressive closing to connect fragmented motion
+        # This is key - tennis player motion is fragmented across arms, legs, torso
+        # A large kernel connects these into a single "person" contour
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+        merged_mask = cv2.morphologyEx(accumulated_mask, cv2.MORPH_CLOSE, kernel, iterations=3)
+
+        # Also apply opening to remove small noise
+        kernel_small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        merged_mask = cv2.morphologyEx(merged_mask, cv2.MORPH_OPEN, kernel_small, iterations=1)
+
+        # Find contours on merged mask
+        contours, _ = cv2.findContours(merged_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Also find contours on raw combined mask for comparison
+        raw_contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         best_bbox = None
         best_score = 0
+        best_zone = None
 
+        # Evaluate merged contours first (these represent connected motion regions)
         for contour in contours:
             area = cv2.contourArea(contour)
-            # Minimum area: 0.5% of frame (was 2%, too restrictive)
-            min_area = width * height * 0.003
+            # Lower minimum area since we merged fragments
+            min_area = width * height * 0.002
 
             if area < min_area:
                 continue
@@ -92,13 +120,54 @@ class PersonDetector:
             x, y, w, h = cv2.boundingRect(contour)
             center_x, center_y = x + w/2, y + h/2
 
-            # Person-like aspect ratio (was 0.8-2.2, now 0.5-2.5 to include swinging)
+            # Person-like aspect ratio (more lenient for merged contours)
             aspect_ratio = h / max(w, 1)
-            if aspect_ratio < 0.4 or aspect_ratio > 3.0:
+            if aspect_ratio < 0.3 or aspect_ratio > 4.0:
                 continue
 
-            # Width filter - but more lenient (was 35%, now 50%)
-            if w > width * 0.6:
+            # CRITICAL: Width filter - reject detections that are too wide
+            # A single person should be at most ~35% of frame width
+            # Wider detections likely include multiple people or background motion
+            if w > width * 0.35:
+                # Try to split wide detections - see if we can find person-sized regions
+                # within this bounding box
+                split_candidates = self._split_wide_bbox(
+                    x, y, w, h, mag_norm, width, height, area
+                )
+                for candidate in split_candidates:
+                    cx, cy, cw, ch, motion_score = candidate
+                    # Evaluate the split candidate
+                    cand_center_x = cx + cw / 2
+                    cand_center_y = cy + ch / 2
+                    cand_zone_width = width // 3
+
+                    if cand_center_x < cand_zone_width:
+                        cand_zone = 'LEFT'
+                    elif cand_center_x < cand_zone_width * 2:
+                        cand_zone = 'CENTER'
+                    else:
+                        cand_zone = 'RIGHT'
+
+                    cand_center_bonus = 1.0 - abs(cand_center_x - width/2) / (width/2)
+                    # No zone bias - track the player wherever they move
+                    cand_zone_bias = 0.0
+
+                    cand_y_score = 1.0 if cy < height * 0.75 else 0.5
+
+                    cand_score = (area * 0.3 + motion_score * 1000) * (1 + cand_center_bonus + cand_zone_bias) * cand_y_score
+
+                    if self.prev_bbox:
+                        px, py, pw, ph, _ = self.prev_bbox[:5]
+                        prev_center_x = px + pw/2
+                        prev_center_y = py + ph/2
+                        dist = np.sqrt((cand_center_x - prev_center_x)**2 + (cand_center_y - prev_center_y)**2)
+                        if dist < 200:
+                            cand_score *= 1.5
+
+                    if cand_score > best_score:
+                        best_score = cand_score
+                        best_bbox = (cx, cy, cw, ch)
+                        best_zone = cand_zone
                 continue
 
             # Define zones for bias calculation
@@ -116,7 +185,7 @@ class PersonDetector:
             roi_flow = mag_norm[y:y+h, x:x+w]
             avg_motion = np.mean(roi_flow) if roi_flow.size > 0 else 0
 
-            # Motion density
+            # Motion density - what fraction of the ROI has motion
             motion_pixels = cv2.countNonZero(roi_flow)
             motion_density = motion_pixels / roi_flow.size if roi_flow.size > 0 else 0
 
@@ -126,53 +195,248 @@ class PersonDetector:
             # Center preference (active player tends to be center-court)
             center_bonus = 1.0 - abs(center_x - width/2) / (width/2)
 
-            # STRONG zone bias - tennis player is almost always in CENTER zone
-            # This prevents false positives on static observers on the sides
+            # NO zone bias - track the player wherever they move on the court
+            # Zone is only used for logging/analysis, not for scoring
             zone_bias = 0.0
-            if contour_zone == 'CENTER':
-                zone_bias = 0.5  # 50% bonus for CENTER zone
-            elif contour_zone == 'LEFT':
-                zone_bias = -0.3  # 30% penalty for LEFT zone
 
             # Prefer bounding boxes that start in upper-middle (where players are)
-            y_position_score = 1.0 if y < height * 0.7 else 0.5
+            y_position_score = 1.0 if y < height * 0.75 else 0.5
 
             # Combined score
-            score = area * motion_score * (1 + 0.5 * center_bonus + zone_bias) * y_position_score
+            score = (area * 0.3 + motion_score * 1000) * (1 + center_bonus + zone_bias) * y_position_score
 
-            # Temporal consistency - prefer bbox near previous detection
+            # Temporal consistency - STRONG preference for bbox near previous detection
+            # Active player moves smoothly, static observers appear suddenly
             if self.prev_bbox:
                 px, py, pw, ph, _ = self.prev_bbox[:5]
                 prev_center_x = px + pw/2
                 prev_center_y = py + ph/2
                 dist = np.sqrt((center_x - prev_center_x)**2 + (center_y - prev_center_y)**2)
-                if dist < 250:
-                    score *= 1.3
+                if dist < 200:  # Tighter threshold
+                    score *= 1.5  # Stronger bonus for continuity
 
             if score > best_score:
                 best_score = score
                 best_bbox = (x, y, w, h)
+                best_zone = contour_zone
+
+        # If no good merged contour found, fall back to evaluating raw contours
+        # This catches cases where merging was too aggressive
+        if best_bbox is None:
+            # Group nearby raw contours into clusters
+            clusters = self._cluster_contours(raw_contours, max_distance=50)
+
+            for cluster in clusters:
+                # Compute bounding box for cluster
+                all_points = np.vstack([contour.reshape(-1, 2) for contour in cluster])
+                x, y, w, h = cv2.boundingRect(all_points)
+                area = sum(cv2.contourArea(c) for c in cluster)
+                center_x, center_y = x + w/2, y + h/2
+
+                min_area = width * height * 0.001  # Even lower for clusters
+
+                if area < min_area:
+                    continue
+
+                aspect_ratio = h / max(w, 1)
+                if aspect_ratio < 0.3 or aspect_ratio > 4.0:
+                    continue
+
+                if w > width * 0.7:
+                    continue
+
+                zone_width = width // 3
+                if center_x < zone_width:
+                    contour_zone = 'LEFT'
+                elif center_x < zone_width * 2:
+                    contour_zone = 'CENTER'
+                else:
+                    contour_zone = 'RIGHT'
+
+                # Calculate motion intensity
+                roi_flow = mag_norm[y:y+h, x:x+w]
+                avg_motion = np.mean(roi_flow) if roi_flow.size > 0 else 0
+                motion_pixels = cv2.countNonZero(roi_flow)
+                motion_density = motion_pixels / roi_flow.size if roi_flow.size > 0 else 0
+                motion_score = (avg_motion / 255) * 0.5 + motion_density * 0.5
+
+                center_bonus = 1.0 - abs(center_x - width/2) / (width/2)
+
+                # No zone bias - track the player wherever they move
+                zone_bias = 0.0
+
+                y_position_score = 1.0 if y < height * 0.75 else 0.5
+                score = (area * 0.3 + motion_score * 1000) * (1 + center_bonus + zone_bias) * y_position_score
+
+                if self.prev_bbox:
+                    px, py, pw, ph, _ = self.prev_bbox[:5]
+                    prev_center_x = px + pw/2
+                    prev_center_y = py + ph/2
+                    dist = np.sqrt((center_x - prev_center_x)**2 + (center_y - prev_center_y)**2)
+                    if dist < 200:
+                        score *= 1.5
+
+                if score > best_score:
+                    best_score = score
+                    best_bbox = (x, y, w, h)
+                    best_zone = contour_zone
 
         # Return best detection
         if best_bbox:
             x, y, w, h = best_bbox
             self.frames_without_detection = 0
-            confidence = min(1.0, best_score / (width * height * 0.05))
+            confidence = min(1.0, best_score / (width * height * 0.03))
             self.prev_bbox = (x, y, w, h, confidence)
             self.prev_gray = gray
             return (x, y, w, h, confidence)
 
         # Fallback: if no motion detected, don't return stale bbox
-        # Let the pose estimation work without a prior
         self.frames_without_detection += 1
 
-        # Clear previous bbox after 5 frames without detection
-        # This prevents stale landmarks from persisting
-        if self.frames_without_detection > 5:
+        # Clear previous bbox after 3 frames without detection (faster decay)
+        if self.frames_without_detection > 3:
             self.prev_bbox = None
+            # Reset motion accumulator
+            self.motion_accumulator = None
+            self.accumulation_count = 0
 
         self.prev_gray = gray
         return None
+
+    def _cluster_contours(self, contours: List[np.ndarray],
+                          max_distance: float = 50) -> List[List[np.ndarray]]:
+        """
+        Group nearby contours into clusters.
+
+        Args:
+            contours: List of contours to cluster
+            max_distance: Maximum distance between contours to be in same cluster
+
+        Returns:
+            List of contour clusters
+        """
+        if not contours:
+            return []
+
+        # Filter out tiny contours first
+        min_contour_area = 50  # pixels
+        valid_contours = [c for c in contours if cv2.contourArea(c) > min_contour_area]
+
+        if not valid_contours:
+            return []
+
+        # Simple clustering: assign each contour to nearest cluster
+        clusters = [[valid_contours[0]]]
+
+        for contour in valid_contours[1:]:
+            bbox = cv2.boundingRect(contour)
+            center = (bbox[0] + bbox[2]/2, bbox[1] + bbox[3]/2)
+
+            best_cluster = None
+            best_dist = float('inf')
+
+            for i, cluster in enumerate(clusters):
+                # Find distance to nearest contour in cluster
+                for other in cluster:
+                    other_bbox = cv2.boundingRect(other)
+                    other_center = (other_bbox[0] + other_bbox[2]/2, other_bbox[1] + other_bbox[3]/2)
+                    dist = np.sqrt((center[0] - other_center[0])**2 + (center[1] - other_center[1])**2)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_cluster = i
+
+            if best_dist <= max_distance:
+                clusters[best_cluster].append(contour)
+            else:
+                clusters.append([contour])
+
+        return clusters
+
+    def _split_wide_bbox(self, x: int, y: int, w: int, h: int,
+                         mag_norm: np.ndarray, img_w: int, img_h: int,
+                         total_area: float) -> List[Tuple[int, int, int, int, float]]:
+        """
+        Split a wide bounding box into person-sized candidates.
+
+        When a detection is too wide (>45% of frame), it likely includes multiple
+        people or background motion. This method tries to find person-sized regions
+        within the wide bbox.
+
+        Args:
+            x, y, w, h: Original bounding box
+            mag_norm: Optical flow magnitude image
+            img_w, img_h: Image dimensions
+            total_area: Total contour area
+
+        Returns:
+            List of (x, y, w, h, motion_score) tuples for candidate regions
+        """
+        candidates = []
+
+        # Split the wide bbox into 3 overlapping regions and find the best person-sized one
+        # Person width should be roughly 15-25% of frame width
+        target_person_width = int(img_w * 0.20)
+        min_person_width = int(img_w * 0.12)
+        max_person_width = int(img_w * 0.35)
+
+        # Slide a window across the bbox to find person-sized regions with high motion
+        step = target_person_width // 2
+
+        for offset_x in range(0, w - target_person_width + 1, step):
+            sub_x = x + offset_x
+            sub_w = target_person_width
+
+            # Calculate motion in this sub-region
+            roi_flow = mag_norm[y:y+h, sub_x:sub_x+sub_w]
+            if roi_flow.size == 0:
+                continue
+
+            avg_motion = np.mean(roi_flow)
+            motion_pixels = cv2.countNonZero(roi_flow)
+            motion_density = motion_pixels / roi_flow.size
+
+            # Only consider regions with significant motion
+            if motion_density < 0.05 or avg_motion < 20:
+                continue
+
+            # Check if this region has person-like properties
+            aspect_ratio = h / sub_w
+            if aspect_ratio < 0.8 or aspect_ratio > 3.5:
+                continue
+
+            motion_score = (avg_motion / 255) * 0.5 + motion_density * 0.5
+            candidates.append((sub_x, y, sub_w, h, motion_score))
+
+        # Also try to find the region with highest motion concentration
+        # by dividing the bbox into left/center/right thirds
+        third_w = w // 3
+        for i in range(3):
+            sub_x = x + i * third_w
+            sub_w = third_w
+
+            # Ensure minimum width
+            if sub_w < min_person_width:
+                sub_w = min_person_width
+
+            roi_flow = mag_norm[y:y+h, sub_x:sub_x+sub_w]
+            if roi_flow.size == 0:
+                continue
+
+            avg_motion = np.mean(roi_flow)
+            motion_pixels = cv2.countNonZero(roi_flow)
+            motion_density = motion_pixels / roi_flow.size
+
+            if motion_density < 0.05 or avg_motion < 20:
+                continue
+
+            motion_score = (avg_motion / 255) * 0.5 + motion_density * 0.5
+            candidates.append((sub_x, y, sub_w, h, motion_score))
+
+        # Return candidates sorted by motion score (highest first)
+        candidates.sort(key=lambda c: c[4], reverse=True)
+
+        # Return top 2 candidates (in case there are two people)
+        return candidates[:2]
 
 
 class PoseOverlayProcessor:
