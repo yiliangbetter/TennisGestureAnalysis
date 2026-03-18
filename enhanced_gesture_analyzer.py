@@ -413,43 +413,19 @@ class EnhancedTennisGestureAnalyzer:
             self.prev_landmarks_confidence = conf * 0.8  # Scale confidence
             return landmarks
 
-        # No bbox provided - decay confidence and return None if too low
-        if self.prev_landmarks is not None:
-            self.prev_landmarks_confidence *= 0.85  # Faster decay
+        # No bbox provided - use temporal interpolation from previous landmarks
+        # This is better than detecting the wrong person!
+        if self.prev_landmarks is not None and self.prev_landmarks_confidence > 0.4:
+            self.prev_landmarks_confidence *= 0.92  # Decay confidence
 
-            # Stop using previous landmarks after 3 frames without detection
-            if self.prev_landmarks_confidence < 0.3:
-                self.prev_landmarks = None
-                self.prev_landmarks_confidence = 0
-                return None
+            # Return interpolated landmarks with small jitter for natural movement
+            if self.prev_landmarks_confidence >= 0.3:
+                return self.prev_landmarks * 0.985 + np.random.normal(0, 0.003, self.prev_landmarks.shape)
 
-            return self.prev_landmarks * 0.98 + np.random.normal(0, 0.005, self.prev_landmarks.shape)
-
-        # Try to detect human-like contours as last resort
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-
-        # Simple threshold-based segmentation
-        _, thresh = cv2.threshold(blurred, 100, 255, cv2.THRESH_BINARY_INV)
-
-        # Find contours
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        if contours:
-            # Find largest contour (assume it's the person)
-            largest_contour = max(contours, key=cv2.contourArea)
-            area = cv2.contourArea(largest_contour)
-
-            if area > 1000:  # Minimum area threshold
-                # Get bounding box
-                x, y, bw, bh = cv2.boundingRect(largest_contour)
-
-                # Create approximate 33 landmarks based on bounding box
-                landmarks = self._create_landmarks_from_bbox(x, y, bw, bh, w, h)
-                self.prev_landmarks = landmarks
-                self.prev_landmarks_confidence = 0.5
-                return landmarks
-
+        # Confidence too low - clear and return None
+        # Don't try to detect from contours - that picks up wrong person
+        self.prev_landmarks = None
+        self.prev_landmarks_confidence = 0
         return None
 
     def _create_landmarks_from_bbox(self, x: int, y: int, bw: int, bh: int,

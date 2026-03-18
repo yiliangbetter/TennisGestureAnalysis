@@ -45,7 +45,7 @@ class PersonDetector:
 
     def detect_person(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int, float]]:
         """
-        Detect the ACTIVE tennis player using frame differencing.
+        Detect the ACTIVE tennis player using motion cues.
 
         Returns:
             (x, y, w, h, confidence) or None if no person detected
@@ -54,9 +54,15 @@ class PersonDetector:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (5, 5), 0)
 
-        # Need at least 2 frames for differencing
+        # First frame: use appearance-based detection (person-like shapes)
         if self.prev_gray is None:
             self.prev_gray = gray
+            # Use simple person detection based on vertical edges and proportions
+            bbox = self._detect_person_appearance(frame)
+            if bbox:
+                x, y, w, h = bbox
+                self.prev_bbox = (x, y, w, h, 0.5)
+                return (x, y, w, h, 0.5)
             return None
 
         # Frame differencing with adaptive threshold
@@ -89,8 +95,6 @@ class PersonDetector:
         _, accumulated_mask = cv2.threshold(accumulated_motion, 80, 255, cv2.THRESH_BINARY)
 
         # MORPHOLOGICAL MERGING: Use very aggressive closing to connect fragmented motion
-        # This is key - tennis player motion is fragmented across arms, legs, torso
-        # A large kernel connects these into a single "person" contour
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
         merged_mask = cv2.morphologyEx(accumulated_mask, cv2.MORPH_CLOSE, kernel, iterations=3)
 
@@ -104,11 +108,24 @@ class PersonDetector:
         # Also find contours on raw combined mask for comparison
         raw_contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+        # Pre-compute court mask for spatial preference
+        # Tennis court is typically the reddish/brown area in lower portion of frame
+        court_mask = self._detect_court_area(frame)
+
         best_bbox = None
         best_score = 0
         best_zone = None
+        best_on_court = False
 
-        # Evaluate merged contours first (these represent connected motion regions)
+        # First pass: find best on-court detection
+        # This ensures we prefer the active player on court over static observers
+        best_bbox = None
+        best_score = 0
+        best_zone = None
+        best_on_court = False
+
+        # First pass: find best on-court detection
+        # This ensures we prefer the active player on court over static observers
         for contour in contours:
             area = cv2.contourArea(contour)
             # Lower minimum area since we merged fragments
@@ -125,18 +142,34 @@ class PersonDetector:
             if aspect_ratio < 0.3 or aspect_ratio > 4.0:
                 continue
 
+            # Define zones for bias calculation
+            zone_width = width // 3
+
+            # Determine zone
+            if center_x < zone_width:
+                contour_zone = 'LEFT'
+            elif center_x < zone_width * 2:
+                contour_zone = 'CENTER'
+            else:
+                contour_zone = 'RIGHT'
+
+            # COURT CHECK: Compute court multiplier early for filtering
+            feet_y = int(min(center_y + h * 0.35, height - 1))
+            feet_x = int(center_x)
+            on_court = court_mask[feet_y, feet_x] > 0 if feet_y < height else False
+
+            # Skip off-court detections in first pass
+            if not on_court:
+                continue
+
             # CRITICAL: Width filter - reject detections that are too wide
-            # A single person should be at most ~35% of frame width
-            # Wider detections likely include multiple people or background motion
             if w > width * 0.35:
-                # Try to split wide detections - see if we can find person-sized regions
-                # within this bounding box
+                # Try to split wide detections
                 split_candidates = self._split_wide_bbox(
                     x, y, w, h, mag_norm, width, height, area
                 )
                 for candidate in split_candidates:
                     cx, cy, cw, ch, motion_score = candidate
-                    # Evaluate the split candidate
                     cand_center_x = cx + cw / 2
                     cand_center_y = cy + ch / 2
                     cand_zone_width = width // 3
@@ -149,12 +182,29 @@ class PersonDetector:
                         cand_zone = 'RIGHT'
 
                     cand_center_bonus = 1.0 - abs(cand_center_x - width/2) / (width/2)
-                    # No zone bias - track the player wherever they move
                     cand_zone_bias = 0.0
 
-                    cand_y_score = 1.0 if cy < height * 0.75 else 0.5
+                    # COURT PREFERENCE: Favor detections on the court surface
+                    # Person's feet should be on court (lower part of bbox)
+                    feet_y = int(min(cy + ch * 0.85, height - 1))
+                    feet_x = int(cx)
+                    on_court = court_mask[feet_y, feet_x] > 0 if feet_y < height else False
+                    # STRONG court bonus: on-court gets 2x multiplier, off-court gets 0.3x
+                    court_multiplier = 2.0 if on_court else 0.3
 
-                    cand_score = (area * 0.3 + motion_score * 1000) * (1 + cand_center_bonus + cand_zone_bias) * cand_y_score
+                    # PERSON-SIZE PREFERENCE: Favor realistic person sizes
+                    ideal_person_area = width * height * 0.08
+                    cand_area = cw * ch  # Use bbox area for candidates
+                    area_ratio = cand_area / ideal_person_area if ideal_person_area > 0 else 1
+                    if area_ratio > 1.0:
+                        size_penalty = 0.3 / area_ratio  # Inverse scaling for large detections
+                    elif area_ratio < 0.3:
+                        size_penalty = 0.5
+                    else:
+                        size_penalty = 1.0  # Ideal range (30-100% of ideal)
+
+                    cand_y_score = 1.0 if cy < height * 0.75 else 0.5
+                    cand_score = (area * 0.3 + motion_score * 1000) * (1 + cand_center_bonus + cand_zone_bias) * cand_y_score * court_multiplier * size_penalty
 
                     if self.prev_bbox:
                         px, py, pw, ph, _ = self.prev_bbox[:5]
@@ -196,14 +246,33 @@ class PersonDetector:
             center_bonus = 1.0 - abs(center_x - width/2) / (width/2)
 
             # NO zone bias - track the player wherever they move on the court
-            # Zone is only used for logging/analysis, not for scoring
             zone_bias = 0.0
+
+            # COURT PREFERENCE: Favor detections on the court surface
+            # Check if person's feet are on the court (use bottom 15% of bbox)
+            feet_y = int(min(center_y + h * 0.35, height - 1))
+            feet_x = int(center_x)
+            on_court = court_mask[feet_y, feet_x] > 0 if feet_y < height else False
+            # STRONG court multiplier: on-court gets 2x, off-court gets 0.3x
+            court_multiplier = 2.0 if on_court else 0.3
+
+            # PERSON-SIZE PREFERENCE: Favor realistic person sizes (penalize very large detections)
+            # Static observers close to camera appear huge - active player is smaller
+            ideal_person_area = width * height * 0.08  # ~8% of frame is typical person
+            area_ratio = area / ideal_person_area if ideal_person_area > 0 else 1
+            # Penalty for being too large (static observer) or too small (noise)
+            if area_ratio > 1.0:
+                size_penalty = 0.3 / area_ratio  # Inverse scaling for large detections
+            elif area_ratio < 0.3:
+                size_penalty = 0.5  # Penalty for too small
+            else:
+                size_penalty = 1.0  # Ideal range (30-100% of ideal)
 
             # Prefer bounding boxes that start in upper-middle (where players are)
             y_position_score = 1.0 if y < height * 0.75 else 0.5
 
-            # Combined score
-            score = (area * 0.3 + motion_score * 1000) * (1 + center_bonus + zone_bias) * y_position_score
+            # Combined score with court multiplier and size penalty
+            score = (area * 0.3 + motion_score * 1000) * (1 + center_bonus + zone_bias) * y_position_score * court_multiplier * size_penalty
 
             # Temporal consistency - STRONG preference for bbox near previous detection
             # Active player moves smoothly, static observers appear suddenly
@@ -219,6 +288,64 @@ class PersonDetector:
                 best_score = score
                 best_bbox = (x, y, w, h)
                 best_zone = contour_zone
+                best_on_court = on_court
+
+        # Second pass: only if no on-court detection was found
+        # This ensures we prefer the active player on court over static observers
+        if not best_on_court:
+            # Re-evaluate off-court contours with much stricter criteria
+            # Only accept off-court if it's extremely close to previous bbox
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                if area < width * height * 0.002:
+                    continue
+
+                x, y, w, h = cv2.boundingRect(contour)
+                center_x, center_y = x + w/2, y + h/2
+
+                aspect_ratio = h / max(w, 1)
+                if aspect_ratio < 0.3 or aspect_ratio > 4.0:
+                    continue
+
+                feet_y = int(min(center_y + h * 0.35, height - 1))
+                feet_x = int(center_x)
+                on_court = court_mask[feet_y, feet_x] > 0 if feet_y < height else False
+
+                # Skip if on-court (already processed) or if no previous bbox to compare
+                if on_court or self.prev_bbox is None:
+                    continue
+
+                # Only accept off-court if very close to previous position
+                px, py, pw, ph, _ = self.prev_bbox[:5]
+                prev_center_x = px + pw/2
+                prev_center_y = py + ph/2
+                dist = np.sqrt((center_x - prev_center_x)**2 + (center_y - prev_center_y)**2)
+
+                if dist > 150:  # Stricter distance threshold for off-court
+                    continue
+
+                # This is a valid continuation - use it
+                zone_width = width // 3
+                contour_zone = 'LEFT' if center_x < zone_width else ('CENTER' if center_x < zone_width * 2 else 'RIGHT')
+
+                if w > width * 0.35:
+                    continue  # Don't split in second pass
+
+                roi_flow = mag_norm[y:y+h, x:x+w]
+                avg_motion = np.mean(roi_flow) if roi_flow.size > 0 else 0
+                motion_pixels = cv2.countNonZero(roi_flow)
+                motion_density = motion_pixels / roi_flow.size if roi_flow.size > 0 else 0
+                motion_score = (avg_motion / 255) * 0.5 + motion_density * 0.5
+
+                center_bonus = 1.0 - abs(center_x - width/2) / (width/2)
+                y_position_score = 1.0 if y < height * 0.75 else 0.5
+
+                score = (area * 0.3 + motion_score * 1000) * (1 + center_bonus) * y_position_score
+                if score > best_score:
+                    best_score = score
+                    best_bbox = (x, y, w, h)
+                    best_zone = contour_zone
+                    best_on_court = False
 
         # If no good merged contour found, fall back to evaluating raw contours
         # This catches cases where merging was too aggressive
@@ -265,8 +392,24 @@ class PersonDetector:
                 # No zone bias - track the player wherever they move
                 zone_bias = 0.0
 
+                # COURT PREFERENCE: Check if feet are on court
+                feet_y = int(min(center_y + h * 0.35, height - 1))
+                feet_x = int(center_x)
+                on_court = court_mask[feet_y, feet_x] > 0 if feet_y < height else False
+                court_multiplier = 2.0 if on_court else 0.3
+
+                # PERSON-SIZE PREFERENCE: Favor realistic person sizes
+                ideal_person_area = width * height * 0.08
+                area_ratio = area / ideal_person_area if ideal_person_area > 0 else 1
+                if area_ratio > 1.0:
+                    size_penalty = 0.3 / area_ratio  # Inverse scaling for large detections
+                elif area_ratio < 0.3:
+                    size_penalty = 0.5
+                else:
+                    size_penalty = 1.0  # Ideal range (30-100% of ideal)
+
                 y_position_score = 1.0 if y < height * 0.75 else 0.5
-                score = (area * 0.3 + motion_score * 1000) * (1 + center_bonus + zone_bias) * y_position_score
+                score = (area * 0.3 + motion_score * 1000) * (1 + center_bonus + zone_bias) * y_position_score * court_multiplier * size_penalty
 
                 if self.prev_bbox:
                     px, py, pw, ph, _ = self.prev_bbox[:5]
@@ -290,16 +433,23 @@ class PersonDetector:
             self.prev_gray = gray
             return (x, y, w, h, confidence)
 
-        # Fallback: if no motion detected, don't return stale bbox
+        # Fallback: return previous bbox with decaying confidence
+        # This maintains skeleton on player during brief low-motion periods
         self.frames_without_detection += 1
 
-        # Clear previous bbox after 3 frames without detection (faster decay)
-        if self.frames_without_detection > 3:
-            self.prev_bbox = None
-            # Reset motion accumulator
-            self.motion_accumulator = None
-            self.accumulation_count = 0
+        if self.prev_bbox is not None and self.frames_without_detection <= 5:
+            # Return previous bbox with decaying confidence
+            px, py, pw, ph, prev_conf = self.prev_bbox[:5]
+            new_conf = prev_conf * 0.85  # Decay confidence
+            if new_conf > 0.3:
+                self.prev_bbox = (px, py, pw, ph, new_conf)
+                self.prev_gray = gray
+                return (px, py, pw, ph, new_conf)
 
+        # Clear previous bbox after 5 frames without detection
+        self.prev_bbox = None
+        self.motion_accumulator = None
+        self.accumulation_count = 0
         self.prev_gray = gray
         return None
 
@@ -307,25 +457,16 @@ class PersonDetector:
                           max_distance: float = 50) -> List[List[np.ndarray]]:
         """
         Group nearby contours into clusters.
-
-        Args:
-            contours: List of contours to cluster
-            max_distance: Maximum distance between contours to be in same cluster
-
-        Returns:
-            List of contour clusters
         """
         if not contours:
             return []
 
-        # Filter out tiny contours first
-        min_contour_area = 50  # pixels
+        min_contour_area = 50
         valid_contours = [c for c in contours if cv2.contourArea(c) > min_contour_area]
 
         if not valid_contours:
             return []
 
-        # Simple clustering: assign each contour to nearest cluster
         clusters = [[valid_contours[0]]]
 
         for contour in valid_contours[1:]:
@@ -336,7 +477,6 @@ class PersonDetector:
             best_dist = float('inf')
 
             for i, cluster in enumerate(clusters):
-                # Find distance to nearest contour in cluster
                 for other in cluster:
                     other_bbox = cv2.boundingRect(other)
                     other_center = (other_bbox[0] + other_bbox[2]/2, other_bbox[1] + other_bbox[3]/2)
@@ -351,6 +491,76 @@ class PersonDetector:
                 clusters.append([contour])
 
         return clusters
+
+    def _detect_person_appearance(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+        """
+        Detect a person in the first frame using appearance cues.
+
+        Looks for person-like shapes in the CENTER region of the frame,
+        avoiding the edges where static observers typically stand.
+        """
+        height, width = frame.shape[:2]
+
+        # Focus on CENTER region where tennis player typically stands
+        center_left = width // 4
+        center_right = 3 * width // 4
+
+        # Convert to grayscale
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # Use adaptive threshold to find darker objects (like a person)
+        _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
+
+        # Morphological operations to connect regions
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=3)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
+
+        # Find contours
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        best_bbox = None
+        best_score = 0
+
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            min_area = width * height * 0.005  # At least 0.5% of frame
+
+            if area < min_area:
+                continue
+
+            x, y, w, h = cv2.boundingRect(contour)
+            center_x = x + w / 2
+            center_y = y + h / 2
+
+            # Prefer CENTER region but accept anywhere in frame
+            center_bias = 1.0
+            if center_x < center_left or center_x > center_right:
+                center_bias = 0.3  # Lower priority for edge regions
+
+            # Person-like aspect ratio (taller than wide, but be lenient)
+            aspect_ratio = h / max(w, 1)
+            if aspect_ratio < 0.8 or aspect_ratio > 4.0:
+                continue
+
+            # Height should be reasonable (15-80% of frame)
+            height_ratio = h / height
+            if height_ratio < 0.15 or height_ratio > 0.8:
+                continue
+
+            # Prefer contours in upper part of frame (standing person)
+            y_score = 1.0 if y < height * 0.7 else 0.5
+
+            # Prefer contours closer to horizontal center
+            center_bonus = 1.0 - abs(center_x - width / 2) / (width / 2)
+
+            score = area * aspect_ratio * y_score * (1 + center_bonus) * center_bias
+
+            if score > best_score:
+                best_score = score
+                best_bbox = (x, y, w, h)
+
+        return best_bbox
 
     def _split_wide_bbox(self, x: int, y: int, w: int, h: int,
                          mag_norm: np.ndarray, img_w: int, img_h: int,
@@ -437,6 +647,44 @@ class PersonDetector:
 
         # Return top 2 candidates (in case there are two people)
         return candidates[:2]
+
+    def _detect_court_area(self, frame: np.ndarray) -> np.ndarray:
+        """
+        Detect the tennis court area in the frame.
+
+        Uses a geometric model: the tennis court is typically in the lower
+        center-right portion of the frame, while static observers stand on
+        the left side against walls.
+
+        Returns:
+            Binary mask where court pixels are 255, non-court are 0
+        """
+        height, width = frame.shape[:2]
+        court_mask = np.zeros((height, width), dtype=np.uint8)
+
+        # GEOMETRIC COURT MODEL
+        # Tennis court perspective: trapezoid shape, wider at bottom
+        # Court starts around 50% down and 40% across, expands toward bottom-right
+        court_top_y = int(height * 0.50)
+        court_bottom_y = height - 1
+
+        for y in range(court_top_y, court_bottom_y):
+            # Progress from top to bottom of court (0 at top, 1 at bottom)
+            progress = (y - court_top_y) / (court_bottom_y - court_top_y)
+
+            # Left edge: starts at 35% width, expands to 25% (court gets wider)
+            left_x = int(width * (0.35 - 0.10 * progress))
+
+            # Right edge: starts at 85% width, expands to 95%
+            right_x = int(width * (0.85 + 0.10 * progress))
+
+            court_mask[y, left_x:right_x] = 255
+
+        # Apply slight blur and threshold to smooth edges
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+        court_mask = cv2.morphologyEx(court_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+        return court_mask
 
 
 class PoseOverlayProcessor:
