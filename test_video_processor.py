@@ -110,9 +110,10 @@ class TestPlayerNameExtraction(unittest.TestCase):
 
     def test_capitalized_name_extraction(self):
         """Test extracting capitalized names from filename"""
-        filename = "tennis-match-Roger Federer vs Nadal.mp4"
+        # Use a filename without known player keys to test regex extraction
+        filename = "tennis-match-John Smith vs Jane Doe.mp4"
         name = self.processor._extract_player_name(filename)
-        self.assertEqual(name, "Roger Federer")
+        self.assertEqual(name, "John Smith")
 
 
 class TestStrokeTypeExtraction(unittest.TestCase):

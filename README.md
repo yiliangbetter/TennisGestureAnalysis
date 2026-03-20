@@ -114,6 +114,38 @@ The system automatically creates sample poses from raw_videos using K-Means clus
 - Marked with `is_sample_pose = 1`
 - Used for fast similarity comparison
 
+## Testing
+
+### Run All Tests
+
+```bash
+# Using the test runner
+python run_tests.py
+
+# With verbose output
+python run_tests.py --verbose
+
+# Run only database tests
+python run_tests.py database
+
+# Run only video processor tests
+python run_tests.py processor
+```
+
+### Using unittest directly
+
+```bash
+source venv/bin/activate
+python -m unittest discover -p "test_*.py"
+```
+
+### Test Coverage
+
+- **Database tests** (`test_database.py`): 42 tests covering all database operations
+- **Video processor tests** (`test_video_processor.py`): 38 tests for video processing logic
+
+Total: 80 automated tests
+
 ## Technologies Used
 
 - OpenCV: Video processing and computer vision

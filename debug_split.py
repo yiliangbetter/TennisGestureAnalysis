@@ -83,17 +83,28 @@ def debug_split_logic(video_path: str, target_frame: int = 350):
         center_x = x + w / 2
         zone = 'LEFT' if center_x < width // 3 else ('CENTER' if center_x < 2 * width // 3 else 'RIGHT')
 
+        # Calculate aspect ratio
+        aspect_ratio = h / max(w, 1)
+
         # Check max area filter
         max_area = width * height * 0.50
         skip_max_area = area > max_area
+
+        # Check min bottom y filter
+        min_bottom_y = int(height * 0.50)
+        skip_bottom_y = (y + h) < min_bottom_y
+
+        # Check aspect ratio filter
+        skip_aspect = aspect_ratio < 0.9 or aspect_ratio > 4.0
 
         print(f"\nContour {i}:")
         print(f"  bbox: ({x}, {y}, {w}, {h})")
         print(f"  center_x: {center_x:.1f} ({zone} zone)")
         print(f"  area: {area}")
-        print(f"  aspect_ratio: {h/max(w,1):.2f}")
+        print(f"  aspect_ratio: {aspect_ratio:.2f}")
         print(f"  width_ratio: {w/width:.2f} ({w/width*100:.1f}% of frame)")
-        print(f"  SKIP (max_area={max_area:.0f}): {skip_max_area}")
+        print(f"  bottom_y: {y+h} (min={min_bottom_y})")
+        print(f"  FILTERS: skip_max_area={skip_max_area}, skip_bottom_y={skip_bottom_y}, skip_aspect={skip_aspect}")
 
         # Check if this would trigger split logic
         if w > width * 0.35:

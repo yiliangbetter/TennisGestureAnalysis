@@ -128,8 +128,11 @@ class PersonDetector:
             center_x, center_y = x + w/2, y + h/2
 
             # Person-like aspect ratio (more lenient for merged contours)
+            # A standing person is typically taller than wide (aspect_ratio > 1.0)
+            # Allow some variance for different poses but reject racket-only detections
+            # Racket swinging creates wide boxes (aspect_ratio < 1.0) - reject these
             aspect_ratio = h / max(w, 1)
-            if aspect_ratio < 0.3 or aspect_ratio > 4.0:
+            if aspect_ratio < 0.9 or aspect_ratio > 4.0:
                 continue
 
             # Define zones for bias calculation
@@ -151,6 +154,13 @@ class PersonDetector:
             # Skip off-court detections in first pass
             if not on_court:
                 continue
+
+            # CRITICAL: Reject detections where bottom of bbox is too high
+            # A person standing on the court must have their feet in the lower portion
+            # The bottom of the bbox (y + h) should be at least 50% down the frame
+            min_bottom_y = int(height * 0.50)
+            if y + h < min_bottom_y:
+                continue  # This is likely ceiling lights or other high motion
 
             # CRITICAL: Width filter - reject detections that are too wide
             if w > width * 0.35:
@@ -267,7 +277,8 @@ class PersonDetector:
         # This catches cases where merging was too aggressive
         if best_bbox is None:
             # Group nearby raw contours into clusters
-            clusters = self._cluster_contours(raw_contours, max_distance=50)
+            # Increased distance to 150 to group body fragments (head, torso, legs)
+            clusters = self._cluster_contours(raw_contours, max_distance=150)
 
             for cluster in clusters:
                 # Compute bounding box for cluster
@@ -286,8 +297,17 @@ class PersonDetector:
                 if area > max_area:
                     continue
 
+                # CRITICAL: Reject detections too high in the frame
+                # A person standing on court must have their feet in the lower portion
+                # The bottom of the bbox (y + h) should be at least 50% down the frame
+                min_bottom_y = int(height * 0.50)
+                if y + h < min_bottom_y:
+                    continue  # This is likely ceiling lights or other high motion
+
+                # Person-like aspect ratio - standing person is taller than wide
+                # Reject racket-only detections which are typically wider than tall
                 aspect_ratio = h / max(w, 1)
-                if aspect_ratio < 0.3 or aspect_ratio > 4.0:
+                if aspect_ratio < 0.9 or aspect_ratio > 4.0:
                     continue
 
                 if w > width * 0.7:
