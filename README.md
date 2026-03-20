@@ -70,16 +70,49 @@ python main.py my_tennis_video.mp4 --output analysis_output.mp4
 - `test_system.py`: System verification script
 - `requirements.txt`: Project dependencies
 
-## Database Structure
+## Database (SQLite)
 
-The gesture database contains:
-- Sample gesture sequences from professional players
-- Pose landmark data for each frame
-- Key joint positions and angles
-- Movement trajectories
-- Timing information
-- Optical flow data
-- Motion history representations
+### New Database Files
+
+- `schema.sql`: Complete SQLite schema definition
+- `database_manager.py`: Python database manager class
+- `video_processor.py`: Video processing and database population
+- `DATABASE_DESIGN.md`: Detailed database design documentation
+
+### Database Tables
+
+| Table | Description |
+|-------|-------------|
+| `players` | Player information (name, country, professional status) |
+| `videos` | Video metadata (path, duration, fps, dimensions) |
+| `extracted_poses` | Pose data per frame (stroke type, confidence, BLOBs) |
+| `pose_landmarks` | 33 MediaPipe landmarks per pose (x, y, visibility) |
+| `joint_angles` | Pre-calculated joint angles for fast comparison |
+| `gesture_sequences` | Complete gesture sequences (forehand, backhand, serve) |
+| `comparison_results` | Cached comparison results |
+
+### Processing Workflow
+
+```bash
+# 1. Process all videos in raw_videos/ to populate database
+python video_processor.py --process-raw
+
+# 2. Compare an input video against the database
+python video_processor.py --compare SampleInputVideos.mp4
+
+# 3. View database statistics
+python video_processor.py --db tennis_gesture.db
+
+# 4. Filter by stroke type
+python video_processor.py --compare my_forehand.mp4 --stroke forehand
+```
+
+### Sample Poses
+
+The system automatically creates sample poses from raw_videos using K-Means clustering:
+- 5 representative poses per video
+- Marked with `is_sample_pose = 1`
+- Used for fast similarity comparison
 
 ## Technologies Used
 

@@ -63,24 +63,29 @@ def debug_split_logic(video_path: str, target_frame: int = 350):
     _, accumulated_mask = cv2.threshold(accumulated_motion, 80, 255, cv2.THRESH_BINARY)
 
     # Morphological operations
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
-    merged_mask = cv2.morphologyEx(accumulated_mask, cv2.MORPH_CLOSE, kernel, iterations=3)
-    kernel_small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    merged_mask = cv2.morphologyEx(accumulated_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    kernel_small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     merged_mask = cv2.morphologyEx(merged_mask, cv2.MORPH_OPEN, kernel_small, iterations=1)
 
     # Find contours
     contours, _ = cv2.findContours(merged_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    print(f"Found {len(contours)} merged contours")
+    # Also check raw contours (before merging)
+    raw_contours, _ = cv2.findContours(accumulated_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    print(f"Found {len(raw_contours)} raw contours (before merging)")
+    print(f"Found {len(contours)} merged contours (after morphing)")
 
     for i, contour in enumerate(contours):
         area = cv2.contourArea(contour)
-        if area < 1000:
-            continue
 
         x, y, w, h = cv2.boundingRect(contour)
         center_x = x + w / 2
         zone = 'LEFT' if center_x < width // 3 else ('CENTER' if center_x < 2 * width // 3 else 'RIGHT')
+
+        # Check max area filter
+        max_area = width * height * 0.50
+        skip_max_area = area > max_area
 
         print(f"\nContour {i}:")
         print(f"  bbox: ({x}, {y}, {w}, {h})")
@@ -88,6 +93,7 @@ def debug_split_logic(video_path: str, target_frame: int = 350):
         print(f"  area: {area}")
         print(f"  aspect_ratio: {h/max(w,1):.2f}")
         print(f"  width_ratio: {w/width:.2f} ({w/width*100:.1f}% of frame)")
+        print(f"  SKIP (max_area={max_area:.0f}): {skip_max_area}")
 
         # Check if this would trigger split logic
         if w > width * 0.35:

@@ -36,12 +36,7 @@ class PersonDetector:
 
     def __init__(self):
         self.prev_gray = None
-        self.prev_bbox = None
-        self.frames_without_detection = 0
-        # Motion accumulation for multi-frame analysis
-        self.motion_accumulator = None
-        self.accumulation_count = 0
-        self.max_accumulation_frames = 5
+        # No tracking - each frame is detected independently
 
     def detect_person(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int, float]]:
         """
@@ -57,11 +52,9 @@ class PersonDetector:
         # First frame: use appearance-based detection (person-like shapes)
         if self.prev_gray is None:
             self.prev_gray = gray
-            # Use simple person detection based on vertical edges and proportions
             bbox = self._detect_person_appearance(frame)
             if bbox:
                 x, y, w, h = bbox
-                self.prev_bbox = (x, y, w, h, 0.5)
                 return (x, y, w, h, 0.5)
             return None
 
@@ -82,24 +75,16 @@ class PersonDetector:
         # Combine masks - union of both methods
         combined = cv2.bitwise_or(diff_mask, flow_mask)
 
-        # Accumulate motion over multiple frames for more complete player silhouette
-        if self.motion_accumulator is None:
-            self.motion_accumulator = combined.astype(np.float32)
-        else:
-            # Add new motion with decay
-            self.motion_accumulator = self.motion_accumulator * 0.7 + combined.astype(np.float32) * 0.3
-        self.accumulation_count += 1
+        # Threshold for contour detection
+        _, motion_mask = cv2.threshold(combined, 80, 255, cv2.THRESH_BINARY)
 
-        # Use accumulated motion for contour detection
-        accumulated_motion = np.clip(self.motion_accumulator, 0, 255).astype(np.uint8)
-        _, accumulated_mask = cv2.threshold(accumulated_motion, 80, 255, cv2.THRESH_BINARY)
-
-        # MORPHOLOGICAL MERGING: Use very aggressive closing to connect fragmented motion
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
-        merged_mask = cv2.morphologyEx(accumulated_mask, cv2.MORPH_CLOSE, kernel, iterations=3)
+        # Morphological operations to connect fragmented motion
+        # Use smaller kernel and fewer iterations to avoid over-merging
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        merged_mask = cv2.morphologyEx(motion_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
 
         # Also apply opening to remove small noise
-        kernel_small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        kernel_small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         merged_mask = cv2.morphologyEx(merged_mask, cv2.MORPH_OPEN, kernel_small, iterations=1)
 
         # Find contours on merged mask
@@ -130,6 +115,11 @@ class PersonDetector:
             area = cv2.contourArea(contour)
             # Lower minimum area since we merged fragments
             min_area = width * height * 0.002
+
+            # Skip contours that are too large (likely global motion / camera shake)
+            max_area = width * height * 0.50
+            if area > max_area:
+                continue
 
             if area < min_area:
                 continue
@@ -206,14 +196,6 @@ class PersonDetector:
                     cand_y_score = 1.0 if cy < height * 0.75 else 0.5
                     cand_score = (area * 0.3 + motion_score * 1000) * (1 + cand_center_bonus + cand_zone_bias) * cand_y_score * court_multiplier * size_penalty
 
-                    if self.prev_bbox:
-                        px, py, pw, ph, _ = self.prev_bbox[:5]
-                        prev_center_x = px + pw/2
-                        prev_center_y = py + ph/2
-                        dist = np.sqrt((cand_center_x - prev_center_x)**2 + (cand_center_y - prev_center_y)**2)
-                        if dist < 200:
-                            cand_score *= 1.5
-
                     if cand_score > best_score:
                         best_score = cand_score
                         best_bbox = (cx, cy, cw, ch)
@@ -274,78 +256,12 @@ class PersonDetector:
             # Combined score with court multiplier and size penalty
             score = (area * 0.3 + motion_score * 1000) * (1 + center_bonus + zone_bias) * y_position_score * court_multiplier * size_penalty
 
-            # Temporal consistency - STRONG preference for bbox near previous detection
-            # Active player moves smoothly, static observers appear suddenly
-            if self.prev_bbox:
-                px, py, pw, ph, _ = self.prev_bbox[:5]
-                prev_center_x = px + pw/2
-                prev_center_y = py + ph/2
-                dist = np.sqrt((center_x - prev_center_x)**2 + (center_y - prev_center_y)**2)
-                if dist < 200:  # Tighter threshold
-                    score *= 1.5  # Stronger bonus for continuity
-
             if score > best_score:
                 best_score = score
                 best_bbox = (x, y, w, h)
                 best_zone = contour_zone
                 best_on_court = on_court
 
-        # Second pass: only if no on-court detection was found
-        # This ensures we prefer the active player on court over static observers
-        if not best_on_court:
-            # Re-evaluate off-court contours with much stricter criteria
-            # Only accept off-court if it's extremely close to previous bbox
-            for contour in contours:
-                area = cv2.contourArea(contour)
-                if area < width * height * 0.002:
-                    continue
-
-                x, y, w, h = cv2.boundingRect(contour)
-                center_x, center_y = x + w/2, y + h/2
-
-                aspect_ratio = h / max(w, 1)
-                if aspect_ratio < 0.3 or aspect_ratio > 4.0:
-                    continue
-
-                feet_y = int(min(center_y + h * 0.35, height - 1))
-                feet_x = int(center_x)
-                on_court = court_mask[feet_y, feet_x] > 0 if feet_y < height else False
-
-                # Skip if on-court (already processed) or if no previous bbox to compare
-                if on_court or self.prev_bbox is None:
-                    continue
-
-                # Only accept off-court if very close to previous position
-                px, py, pw, ph, _ = self.prev_bbox[:5]
-                prev_center_x = px + pw/2
-                prev_center_y = py + ph/2
-                dist = np.sqrt((center_x - prev_center_x)**2 + (center_y - prev_center_y)**2)
-
-                if dist > 150:  # Stricter distance threshold for off-court
-                    continue
-
-                # This is a valid continuation - use it
-                zone_width = width // 3
-                contour_zone = 'LEFT' if center_x < zone_width else ('CENTER' if center_x < zone_width * 2 else 'RIGHT')
-
-                if w > width * 0.35:
-                    continue  # Don't split in second pass
-
-                roi_flow = mag_norm[y:y+h, x:x+w]
-                avg_motion = np.mean(roi_flow) if roi_flow.size > 0 else 0
-                motion_pixels = cv2.countNonZero(roi_flow)
-                motion_density = motion_pixels / roi_flow.size if roi_flow.size > 0 else 0
-                motion_score = (avg_motion / 255) * 0.5 + motion_density * 0.5
-
-                center_bonus = 1.0 - abs(center_x - width/2) / (width/2)
-                y_position_score = 1.0 if y < height * 0.75 else 0.5
-
-                score = (area * 0.3 + motion_score * 1000) * (1 + center_bonus) * y_position_score
-                if score > best_score:
-                    best_score = score
-                    best_bbox = (x, y, w, h)
-                    best_zone = contour_zone
-                    best_on_court = False
 
         # If no good merged contour found, fall back to evaluating raw contours
         # This catches cases where merging was too aggressive
@@ -363,6 +279,11 @@ class PersonDetector:
                 min_area = width * height * 0.001  # Even lower for clusters
 
                 if area < min_area:
+                    continue
+
+                # Skip clusters that are too large (likely global motion / camera shake)
+                max_area = width * height * 0.50
+                if area > max_area:
                     continue
 
                 aspect_ratio = h / max(w, 1)
@@ -411,14 +332,6 @@ class PersonDetector:
                 y_position_score = 1.0 if y < height * 0.75 else 0.5
                 score = (area * 0.3 + motion_score * 1000) * (1 + center_bonus + zone_bias) * y_position_score * court_multiplier * size_penalty
 
-                if self.prev_bbox:
-                    px, py, pw, ph, _ = self.prev_bbox[:5]
-                    prev_center_x = px + pw/2
-                    prev_center_y = py + ph/2
-                    dist = np.sqrt((center_x - prev_center_x)**2 + (center_y - prev_center_y)**2)
-                    if dist < 200:
-                        score *= 1.5
-
                 if score > best_score:
                     best_score = score
                     best_bbox = (x, y, w, h)
@@ -427,29 +340,11 @@ class PersonDetector:
         # Return best detection
         if best_bbox:
             x, y, w, h = best_bbox
-            self.frames_without_detection = 0
             confidence = min(1.0, best_score / (width * height * 0.03))
-            self.prev_bbox = (x, y, w, h, confidence)
             self.prev_gray = gray
             return (x, y, w, h, confidence)
 
-        # Fallback: return previous bbox with decaying confidence
-        # This maintains skeleton on player during brief low-motion periods
-        self.frames_without_detection += 1
-
-        if self.prev_bbox is not None and self.frames_without_detection <= 5:
-            # Return previous bbox with decaying confidence
-            px, py, pw, ph, prev_conf = self.prev_bbox[:5]
-            new_conf = prev_conf * 0.85  # Decay confidence
-            if new_conf > 0.3:
-                self.prev_bbox = (px, py, pw, ph, new_conf)
-                self.prev_gray = gray
-                return (px, py, pw, ph, new_conf)
-
-        # Clear previous bbox after 5 frames without detection
-        self.prev_bbox = None
-        self.motion_accumulator = None
-        self.accumulation_count = 0
+        # No detection found
         self.prev_gray = gray
         return None
 
@@ -854,8 +749,8 @@ class PoseOverlayProcessor:
                 'person_bbox': person_bbox
             })
 
-            # Create overlay
-            overlay = self.overlay_landmarks(frame, landmarks, frame_count, person_bbox)
+            # Create overlay (show_pose=False for debug mode - only shows person box)
+            overlay = self.overlay_landmarks(frame, landmarks, frame_count, person_bbox, show_pose=False)
 
             # Write to output
             if out is not None:
@@ -881,7 +776,8 @@ class PoseOverlayProcessor:
         return all_landmarks
 
     def overlay_landmarks(self, frame: np.ndarray, landmarks: Optional[np.ndarray],
-                         frame_num: int = 0, person_bbox: Optional[Tuple] = None) -> np.ndarray:
+                         frame_num: int = 0, person_bbox: Optional[Tuple] = None,
+                         show_pose: bool = False) -> np.ndarray:
         """
         Overlay pose landmarks on a frame.
 
@@ -890,6 +786,7 @@ class PoseOverlayProcessor:
             landmarks: 33x2 array of normalized landmarks (or None)
             frame_num: Frame number for display
             person_bbox: Optional (x, y, w, h, confidence) tuple
+            show_pose: If False, only show person box (debug mode)
 
         Returns:
             Frame with overlaid pose visualization
@@ -897,12 +794,65 @@ class PoseOverlayProcessor:
         output = frame.copy()
         height, width = output.shape[:2]
 
-        # Draw person detection bounding box
+        # Draw person detection bounding box with detailed debug info
         if person_bbox:
             x, y, bw, bh, conf = person_bbox
-            cv2.rectangle(output, (x, y), (x + bw, y + bh), (0, 255, 255), 2)
-            cv2.putText(output, f"Person: {conf:.1%}", (x, y - 5),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            center_x = x + bw / 2
+            center_y = y + bh / 2
+            feet_x = int(center_x)
+            feet_y = int(min(y + bh * 0.85, height - 1))
+
+            # Determine zone
+            zone_width = width // 3
+            if center_x < zone_width:
+                zone = 'LEFT'
+                zone_color = (0, 0, 255)  # Red for LEFT (bad)
+            elif center_x < zone_width * 2:
+                zone = 'CENTER'
+                zone_color = (0, 255, 0)  # Green for CENTER (good)
+            else:
+                zone = 'RIGHT'
+                zone_color = (255, 0, 0)  # Blue for RIGHT
+
+            # Check court status
+            court_mask = self.person_detector._detect_court_area(frame)
+            on_court = court_mask[feet_y, feet_x] > 0 if feet_y < height else False
+            court_color = (0, 255, 0) if on_court else (0, 0, 255)
+            court_text = "ON-COURT" if on_court else "OFF-COURT"
+
+            # Draw bounding box (thicker, more visible)
+            cv2.rectangle(output, (x, y), (x + bw, y + bh), zone_color, 3)
+
+            # Draw center point
+            cv2.circle(output, (int(center_x), int(center_y)), 5, zone_color, -1)
+
+            # Draw feet point
+            cv2.circle(output, (feet_x, feet_y), 3, court_color, -1)
+
+            # Draw detailed info box at top-left of frame
+            info_lines = [
+                f"Person Box:",
+                f"  pos=({x},{y}) size={bw}x{bh}",
+                f"  center=({center_x:.0f},{center_y:.0f}) zone={zone}",
+                f"  feet=({feet_x},{feet_y}) {court_text}",
+                f"  conf={conf:.1%}"
+            ]
+
+            # Background for info box
+            box_height = len(info_lines) * 22 + 10
+            info_bg = np.zeros_like(output)
+            cv2.rectangle(info_bg, (5, 5), (280, 5 + box_height), (0, 0, 0), -1)
+            output = cv2.addWeighted(output, 0.7, info_bg, 0.5, 0)
+
+            # Draw info text
+            for i, line in enumerate(info_lines):
+                text_color = zone_color if i == 0 else (255, 255, 255)
+                if "OFF-COURT" in line:
+                    text_color = (0, 0, 255)
+                elif "ON-COURT" in line:
+                    text_color = (0, 255, 0)
+                cv2.putText(output, line, (10, 28 + i * 22),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, text_color, 1)
 
         # Add frame info overlay
         info_bg = np.zeros_like(output)
@@ -912,11 +862,9 @@ class PoseOverlayProcessor:
         cv2.putText(output, f"Frame: {frame_num}", (10, 28),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-        # Add detection status
-        status_color = (0, 255, 0) if landmarks is not None else (0, 0, 255)
-        status = "DETECTED" if landmarks is not None else "NOT DETECTED"
-        cv2.putText(output, f"Pose: {status}", (width - 200, 28),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
+        # If pose display is disabled, return early
+        if not show_pose:
+            return output
 
         if landmarks is None:
             return output
