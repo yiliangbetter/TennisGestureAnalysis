@@ -152,6 +152,28 @@ CREATE INDEX IF NOT EXISTS idx_comparison_input ON comparison_results(input_vide
 CREATE INDEX IF NOT EXISTS idx_comparison_player ON comparison_results(matched_player_id);
 
 -- ============================================================================
+-- VIDEO TEXT OCR TABLE
+-- Stores text extracted from videos using OCR for player name identification
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS video_text_ocr (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id INTEGER NOT NULL,
+    frame_number INTEGER,
+    detected_text TEXT NOT NULL,
+    confidence REAL,
+    bbox_x REAL,
+    bbox_y REAL,
+    bbox_w REAL,
+    bbox_h REAL,
+    is_player_name BOOLEAN DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_ocr_video ON video_text_ocr(video_id);
+CREATE INDEX IF NOT EXISTS idx_ocr_is_player_name ON video_text_ocr(is_player_name);
+
+-- ============================================================================
 -- VIEWS FOR COMMON QUERIES
 -- ============================================================================
 
@@ -200,11 +222,65 @@ END;
 -- SEED DATA (Optional)
 -- ============================================================================
 
--- Insert professional players from raw_videos
+-- ============================================================================
+-- SEED DATA: Professional Tennis Players (50 players)
+-- ============================================================================
 INSERT OR IGNORE INTO players (name, is_professional) VALUES
+    -- Men: Big 4 + Legends
     ('Novak Djokovic', 1),
+    ('Rafael Nadal', 1),
+    ('Roger Federer', 1),
+    ('Andy Murray', 1),
+    -- Men: Next Gen / Top Players
     ('Carlos Alcaraz', 1),
     ('Jannik Sinner', 1),
+    ('Daniil Medvedev', 1),
     ('Alexander Zverev', 1),
     ('Andrey Rublev', 1),
-    ('Ben Shelton', 1);
+    ('Holger Rune', 1),
+    ('Taylor Fritz', 1),
+    ('Casper Ruud', 1),
+    ('Alex de Minaur', 1),
+    ('Grigor Dimitrov', 1),
+    ('Hubert Hurkacz', 1),
+    ('Stefanos Tsitsipas', 1),
+    ('Ben Shelton', 1),
+    ('Tommy Paul', 1),
+    ('Lorenzo Musetti', 1),
+    ('Frances Tiafoe', 1),
+    ('Karen Khachanov', 1),
+    ('Cameron Norrie', 1),
+    ('Alexander Bublik', 1),
+    ('Nicolas Jarry', 1),
+    ('Felix Auger-Aliassime', 1),
+    ('Sebastian Baez', 1),
+    ('Alejandro Davidovich Fokina', 1),
+    ('Francisco Cerundolo', 1),
+    ('Jan-Lennard Struff', 1),
+    ('Tallon Griekspoor', 1),
+    -- Women: Top Players
+    ('Iga Swiatek', 1),
+    ('Aryna Sabalenka', 1),
+    ('Coco Gauff', 1),
+    ('Elena Rybakina', 1),
+    ('Jessica Pegula', 1),
+    ('Ons Jabeur', 1),
+    ('Marketa Vondrousova', 1),
+    ('Maria Sakkari', 1),
+    ('Karolina Muchova', 1),
+    ('Barbora Krejcikova', 1),
+    ('Jelena Ostapenko', 1),
+    ('Daria Kasatkina', 1),
+    ('Liudmila Samsonova', 1),
+    ('Veronika Kudermetova', 1),
+    ('Beatriz Haddad Maia', 1),
+    ('Petra Kvitova', 1),
+    ('Caroline Garcia', 1),
+    ('Madison Keys', 1),
+    ('Elina Svitolina', 1),
+    ('Ekaterina Alexandrova', 1),
+    ('Victoria Azarenka', 1),
+    ('Emma Navarro', 1),
+    ('Qinwen Zheng', 1),
+    ('Jasmine Paolini', 1),
+    ('Marta Kostyuk', 1);

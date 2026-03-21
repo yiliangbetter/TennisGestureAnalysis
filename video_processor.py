@@ -15,6 +15,7 @@ import numpy as np
 
 from database_manager import TennisDatabase, PoseData
 from enhanced_gesture_analyzer import EnhancedTennisGestureAnalyzer
+from database.ocr import VideoTextExtractor
 
 
 class VideoProcessor:
@@ -54,16 +55,19 @@ class VideoProcessor:
     }
 
     def __init__(self, db_path: str = "tennis_gesture.db",
-                 use_opencv_pose: bool = False):
+                 use_opencv_pose: bool = False,
+                 use_ocr: bool = True):
         """
         Initialize video processor.
 
         Args:
             db_path: Path to SQLite database
             use_opencv_pose: Use OpenCV-based pose estimation (vs MediaPipe)
+            use_ocr: Enable OCR-based player name extraction as fallback
         """
         self.db = TennisDatabase(db_path)
         self.analyzer = EnhancedTennisGestureAnalyzer(use_opencv_pose=use_opencv_pose)
+        self.ocr_extractor = VideoTextExtractor(db_path) if use_ocr else None
 
     def process_raw_videos(self, raw_videos_dir: str = "raw_videos",
                           skip_processed: bool = True) -> Dict[str, int]:
@@ -146,7 +150,7 @@ class VideoProcessor:
         """
         # Extract metadata from filename
         filename = os.path.basename(video_path)
-        player_name = self._extract_player_name(filename)
+        player_name = self._extract_player_name(filename, video_path)
         stroke_type = self._extract_stroke_type(filename)
 
         print(f"  Player: {player_name}")
@@ -179,19 +183,43 @@ class VideoProcessor:
 
         return video_id
 
-    def _extract_player_name(self, filename: str) -> str:
-        """Extract player name from video filename"""
+    def _extract_player_name(self, filename: str, video_path: str = None) -> str:
+        """
+        Extract player name from video filename or OCR fallback.
+
+        Args:
+            filename: Video filename
+            video_path: Full path to video (for OCR fallback)
+
+        Returns:
+            Player name (from filename, OCR, or derived from filename)
+        """
         filename_lower = filename.lower()
 
-        # Try mapping first
+        # Try mapping first (fastest path)
         for key, name in self.PLAYER_NAME_MAPPING.items():
             if key in filename_lower:
                 return name
 
-        # Try to find capitalized words
+        # Try to find capitalized words in filename
         matches = re.findall(r'[A-Z][a-z]+\s+[A-Z][a-z]+', filename)
         if matches:
-            return matches[0]
+            candidate = matches[0]
+            # Check if this matches a known player
+            player = self.db.get_player_by_name(candidate)
+            if player:
+                return candidate
+            # If no video path for OCR, return the capitalized name (old behavior)
+            if not video_path or not self.ocr_extractor:
+                return candidate
+
+        # Fallback to OCR if enabled and video path provided
+        if self.ocr_extractor and video_path:
+            print("    Trying OCR-based player name extraction...")
+            ocr_name = self.ocr_extractor.extract_player_name_from_video(video_path)
+            if ocr_name:
+                print(f"    OCR identified: {ocr_name}")
+                return ocr_name
 
         # Fall back to filename without extension
         return Path(filename).stem.replace('-', ' ').replace('_', ' ').title()

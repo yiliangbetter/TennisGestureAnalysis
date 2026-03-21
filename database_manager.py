@@ -245,6 +245,25 @@ class TennisDatabase:
                 CREATE INDEX IF NOT EXISTS idx_landmarks_pose ON pose_landmarks(pose_id);
                 CREATE INDEX IF NOT EXISTS idx_angles_pose ON joint_angles(pose_id);
                 CREATE INDEX IF NOT EXISTS idx_sequences_player ON gesture_sequences(player_id);
+
+                -- Video Text OCR Table
+                CREATE TABLE IF NOT EXISTS video_text_ocr (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    video_id INTEGER NOT NULL,
+                    frame_number INTEGER,
+                    detected_text TEXT NOT NULL,
+                    confidence REAL,
+                    bbox_x REAL,
+                    bbox_y REAL,
+                    bbox_w REAL,
+                    bbox_h REAL,
+                    is_player_name BOOLEAN DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_ocr_video ON video_text_ocr(video_id);
+                CREATE INDEX IF NOT EXISTS idx_ocr_is_player_name ON video_text_ocr(is_player_name);
             """)
 
     # =========================================================================
