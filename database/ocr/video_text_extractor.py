@@ -63,13 +63,12 @@ class VideoTextExtractor:
             db_path: Path to SQLite database
             use_easyocr: Use EasyOCR (True) or fallback to simple method (False)
         """
-        self.db = TennisDatabase(db_path)
+        self.db = TennisDatabase(db_path, include_seed_data=True)
         self.use_easyocr = use_easyocr
         self._ocr_reader = None
 
         # Frame sampling settings
         self.frame_sample_interval = 60  # Sample every N frames
-        self.crop_ratio = 0.4            # Crop bottom 40% of frame
 
     @property
     def ocr_reader(self):
@@ -179,6 +178,9 @@ class VideoTextExtractor:
         """
         Extract text from video frames using OCR.
 
+        Processes full frames without cropping to avoid missing text
+        that may appear anywhere on screen.
+
         Args:
             video_path: Path to video file
             video_id: Database video ID
@@ -191,9 +193,6 @@ class VideoTextExtractor:
         if not cap.isOpened():
             return []
 
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
         ocr_results = []
         frame_num = 0
 
@@ -204,16 +203,12 @@ class VideoTextExtractor:
 
             # Sample frames at intervals
             if frame_num % self.frame_sample_interval == 0:
-                # Crop to bottom portion where names typically appear
-                crop_y = int(height * (1 - self.crop_ratio))
-                cropped_frame = frame[crop_y:, :]
-
-                # Run OCR on cropped frame
-                frame_results = self._run_ocr(cropped_frame, frame_num, crop_y)
+                # Run OCR on full frame (no cropping assumption)
+                frame_results = self._run_ocr(frame, frame_num, 0)
                 ocr_results.extend(frame_results)
 
                 # Store results in database
-                self._store_cr_results(video_id, frame_results)
+                self._store_ocr_results(video_id, frame_results)
 
             frame_num += 1
 

@@ -70,15 +70,17 @@ class TennisDatabase:
         31: 'left_foot_index', 32: 'right_foot_index',
     }
 
-    def __init__(self, db_path: str = "tennis_gesture.db"):
+    def __init__(self, db_path: str = "tennis_gesture.db",
+                 include_seed_data: bool = False):
         """
         Initialize database connection and create schema if needed.
 
         Args:
             db_path: Path to SQLite database file
+            include_seed_data: If True, load seed data from schema.sql
         """
         self.db_path = db_path
-        self._initialize_schema()
+        self._initialize_schema(include_seed_data=include_seed_data)
 
     @contextmanager
     def connection(self):

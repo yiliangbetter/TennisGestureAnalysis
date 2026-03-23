@@ -66,7 +66,8 @@ class TestVideoTextExtractor(unittest.TestCase):
     def test_get_all_players(self):
         """Test retrieving all professional players"""
         players = self.db.get_all_players(professionals_only=True)
-        self.assertEqual(len(players), 5)
+        # Should have at least the 5 test players we added
+        self.assertGreaterEqual(len(players), 5)
 
         names = [p['name'] for p in players]
         self.assertIn("Novak Djokovic", names)
