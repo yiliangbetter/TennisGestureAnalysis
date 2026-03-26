@@ -21,11 +21,10 @@ class VideoTextExtractor:
 
     Workflow:
     1. Sample frames from video (every 60 frames ~ 1 per second at 60fps)
-    2. Crop to bottom 1/3 where player names typically appear
-    3. Run OCR on sampled frames
-    4. Store detected text with bounding boxes in database
-    5. Match detected text against known player names
-    6. Return identified player name
+    2. Run OCR on sampled frames (full frame, no cropping assumptions)
+    3. Store detected text with bounding boxes in database
+    4. Match detected text against known player names
+    5. Return identified player name
     """
 
     # Text patterns to filter out (not player names)

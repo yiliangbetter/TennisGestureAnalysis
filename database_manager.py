@@ -104,13 +104,17 @@ class TennisDatabase:
         Args:
             include_seed_data: If True and schema.sql exists, include seed data
                               (default: False for clean test databases)
+
+        Raises:
+            FileNotFoundError: If schema.sql does not exist
         """
         schema_path = Path(__file__).parent / "schema.sql"
 
         if not schema_path.exists():
-            # Inline schema if file doesn't exist
-            self._create_schema_inline()
-            return
+            raise FileNotFoundError(
+                f"Schema file not found at {schema_path}. "
+                "The schema.sql file is required to initialize the database."
+            )
 
         with self.connection() as conn:
             with open(schema_path, "r") as f:
@@ -129,144 +133,6 @@ class TennisDatabase:
                 cleaned_schema = schema_content
 
             conn.executescript(cleaned_schema)
-
-    def _create_schema_inline(self):
-        """Create schema inline if schema.sql doesn't exist"""
-        with self.connection() as conn:
-            conn.executescript("""
-                PRAGMA foreign_keys = ON;
-
-                CREATE TABLE IF NOT EXISTS players (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL UNIQUE,
-                    country TEXT,
-                    is_professional BOOLEAN DEFAULT 0,
-                    metadata TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-
-                CREATE TABLE IF NOT EXISTS videos (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    filename TEXT NOT NULL,
-                    file_path TEXT NOT NULL UNIQUE,
-                    file_hash TEXT,
-                    duration_sec REAL,
-                    fps REAL,
-                    width INTEGER,
-                    height INTEGER,
-                    total_frames INTEGER,
-                    processed BOOLEAN DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-
-                CREATE TABLE IF NOT EXISTS extracted_poses (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    video_id INTEGER NOT NULL,
-                    frame_number INTEGER NOT NULL,
-                    timestamp_ms REAL,
-                    player_id INTEGER,
-                    bbox_x REAL,
-                    bbox_y REAL,
-                    bbox_w REAL,
-                    bbox_h REAL,
-                    stroke_type TEXT,
-                    confidence_score REAL DEFAULT 1.0,
-                    is_sample_pose BOOLEAN DEFAULT 0,
-                    optical_flow_data BLOB,
-                    motion_history BLOB,
-                    hog_features BLOB,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE,
-                    FOREIGN KEY (player_id) REFERENCES players(id) ON DELETE SET NULL,
-                    UNIQUE(video_id, frame_number, player_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS pose_landmarks (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    pose_id INTEGER NOT NULL,
-                    landmark_index INTEGER NOT NULL,
-                    x_coord REAL NOT NULL,
-                    y_coord REAL NOT NULL,
-                    z_coord REAL,
-                    visibility REAL DEFAULT 1.0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (pose_id) REFERENCES extracted_poses(id) ON DELETE CASCADE,
-                    UNIQUE(pose_id, landmark_index)
-                );
-
-                CREATE TABLE IF NOT EXISTS joint_angles (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    pose_id INTEGER NOT NULL,
-                    angle_type TEXT NOT NULL,
-                    angle_value REAL NOT NULL,
-                    calculated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (pose_id) REFERENCES extracted_poses(id) ON DELETE CASCADE
-                );
-
-                CREATE TABLE IF NOT EXISTS gesture_sequences (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    pose_id INTEGER,
-                    video_id INTEGER NOT NULL,
-                    player_id INTEGER NOT NULL,
-                    sequence_type TEXT NOT NULL,
-                    start_frame INTEGER NOT NULL,
-                    end_frame INTEGER NOT NULL,
-                    key_frame INTEGER,
-                    avg_confidence REAL,
-                    trajectory_data BLOB,
-                    velocity_profile BLOB,
-                    acceleration_profile BLOB,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (pose_id) REFERENCES extracted_poses(id) ON DELETE SET NULL,
-                    FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE,
-                    FOREIGN KEY (player_id) REFERENCES players(id) ON DELETE CASCADE
-                );
-
-                CREATE TABLE IF NOT EXISTS comparison_results (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    input_video_path TEXT NOT NULL,
-                    input_pose_id INTEGER,
-                    matched_player_id INTEGER,
-                    matched_sequence_id INTEGER,
-                    similarity_score REAL NOT NULL,
-                    pose_similarity REAL,
-                    angle_similarity REAL,
-                    trajectory_similarity REAL,
-                    motion_similarity REAL,
-                    recommendations TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (input_pose_id) REFERENCES extracted_poses(id) ON DELETE SET NULL,
-                    FOREIGN KEY (matched_player_id) REFERENCES players(id) ON DELETE SET NULL,
-                    FOREIGN KEY (matched_sequence_id) REFERENCES gesture_sequences(id) ON DELETE SET NULL
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_poses_video ON extracted_poses(video_id);
-                CREATE INDEX IF NOT EXISTS idx_poses_player ON extracted_poses(player_id);
-                CREATE INDEX IF NOT EXISTS idx_poses_sample ON extracted_poses(is_sample_pose);
-                CREATE INDEX IF NOT EXISTS idx_poses_stroke ON extracted_poses(stroke_type);
-                CREATE INDEX IF NOT EXISTS idx_landmarks_pose ON pose_landmarks(pose_id);
-                CREATE INDEX IF NOT EXISTS idx_angles_pose ON joint_angles(pose_id);
-                CREATE INDEX IF NOT EXISTS idx_sequences_player ON gesture_sequences(player_id);
-
-                -- Video Text OCR Table
-                CREATE TABLE IF NOT EXISTS video_text_ocr (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    video_id INTEGER NOT NULL,
-                    frame_number INTEGER,
-                    detected_text TEXT NOT NULL,
-                    confidence REAL,
-                    bbox_x REAL,
-                    bbox_y REAL,
-                    bbox_w REAL,
-                    bbox_h REAL,
-                    is_player_name BOOLEAN DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_ocr_video ON video_text_ocr(video_id);
-                CREATE INDEX IF NOT EXISTS idx_ocr_is_player_name ON video_text_ocr(is_player_name);
-            """)
 
     # =========================================================================
     # PLAYER OPERATIONS
