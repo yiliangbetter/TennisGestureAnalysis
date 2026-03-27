@@ -24,7 +24,11 @@ class VideoTextExtractor:
     2. Run OCR on sampled frames (full frame, no cropping assumptions)
     3. Store detected text with bounding boxes in database
     4. Match detected text against known player names
-    5. Return identified player name
+    5. Return identified player name(s)
+
+    Supports both single-player videos and compilation videos with multiple players.
+    Use `extract_player_name_from_video()` for single best match, or
+    `extract_all_player_names_from_video()` to get all detected players.
     """
 
     # Text patterns to filter out (not player names)
@@ -88,6 +92,7 @@ class VideoTextExtractor:
     def extract_player_name_from_video(self, video_path: str) -> Optional[str]:
         """
         Extract player name from a video file.
+        Returns the highest-confidence match (for single-player videos).
 
         Args:
             video_path: Path to video file
@@ -121,6 +126,40 @@ class VideoTextExtractor:
             self._mark_player_name_match(video_id, player_name)
 
         return player_name
+
+    def extract_all_player_names_from_video(self, video_path: str) -> List[str]:
+        """
+        Extract all player names from a video file.
+        Useful for compilation videos containing multiple players.
+
+        Args:
+            video_path: Path to video file
+
+        Returns:
+            List of identified player names (may be empty if none found)
+        """
+        video_path = str(video_path)
+
+        # Check if video exists in database
+        video_id = self._get_or_add_video(video_path)
+        if not video_id:
+            return []
+
+        # Extract text from video frames (may already be cached)
+        ocr_results = self._extract_text_from_video(video_path, video_id)
+
+        if not ocr_results:
+            return []
+
+        # Match all detected player names
+        all_players = self._match_all_player_names(ocr_results)
+
+        # Mark all matched players in database
+        if all_players:
+            for player_name in all_players:
+                self._mark_player_name_match(video_id, player_name)
+
+        return all_players
 
     def _get_or_add_video(self, video_path: str) -> Optional[int]:
         """Get existing video ID or add video to database"""
@@ -276,6 +315,7 @@ class VideoTextExtractor:
     def _match_player_name(self, ocr_results: List[Dict]) -> Optional[str]:
         """
         Match OCR results to known player names.
+        Returns the first (highest confidence) match for backward compatibility.
 
         Args:
             ocr_results: List of OCR results
@@ -283,16 +323,32 @@ class VideoTextExtractor:
         Returns:
             Matched player name or None
         """
+        all_matches = self._match_all_player_names(ocr_results)
+        return all_matches[0] if all_matches else None
+
+    def _match_all_player_names(self, ocr_results: List[Dict]) -> List[str]:
+        """
+        Match OCR results to all known player names.
+
+        For compilation videos that contain multiple players, this method
+        returns all detected players sorted by confidence (highest first).
+
+        Args:
+            ocr_results: List of OCR results
+
+        Returns:
+            List of matched player names, sorted by best match score (descending)
+        """
         # Get all professional players from database
         players = self.db.get_all_players(professionals_only=True)
 
         if not players:
-            return None
+            return []
 
         player_names = [p['name'] for p in players]
 
-        best_match = None
-        best_score = 0.0
+        # Track best score for each player
+        player_scores: Dict[str, float] = {}
 
         for result in ocr_results:
             text = result['detected_text']
@@ -318,11 +374,14 @@ class VideoTextExtractor:
             for player_name in player_names:
                 score = self._calculate_match_score(text, player_name)
 
-                if score > best_score and score >= self.FUZZY_MATCH_THRESHOLD:
-                    best_score = score
-                    best_match = player_name
+                if score >= self.FUZZY_MATCH_THRESHOLD:
+                    # Keep the highest score for each player
+                    if player_name not in player_scores or score > player_scores[player_name]:
+                        player_scores[player_name] = score
 
-        return best_match
+        # Sort by score (descending) and return player names
+        sorted_players = sorted(player_scores.items(), key=lambda x: x[1], reverse=True)
+        return [player for player, score in sorted_players]
 
     def _calculate_match_score(self, ocr_text: str, player_name: str) -> float:
         """
@@ -556,16 +615,21 @@ if __name__ == "__main__":
     video_path = sys.argv[1]
     extractor = VideoTextExtractor()
 
-    print(f"Extracting player name from: {video_path}")
-    player_name = extractor.extract_player_name_from_video(video_path)
+    print(f"Extracting player names from: {video_path}")
+    print("=" * 60)
 
-    if player_name:
-        print(f"Identified player: {player_name}")
+    # Extract all player names (supports compilation videos)
+    all_players = extractor.extract_all_player_names_from_video(video_path)
+
+    if all_players:
+        print(f"\nDetected {len(all_players)} player(s):")
+        for i, player_name in enumerate(all_players, 1):
+            print(f"  {i}. {player_name}")
     else:
-        print("Could not identify player from video text")
+        print("Could not identify any players from video text")
 
     # Show all detected text
-    print("\nAll detected text:")
+    print("\nAll detected text (first 30):")
     with extractor.db.connection() as conn:
         cursor = conn.execute(
             "SELECT id FROM videos WHERE file_path = ?",
@@ -574,6 +638,7 @@ if __name__ == "__main__":
         row = cursor.fetchone()
         if row:
             results = extractor.get_detected_text(row['id'])
-            for r in results[:20]:  # Show first 20 results
+            for r in results[:30]:
+                marker = " [PLAYER]" if r['is_player_name'] else ""
                 print(f"  Frame {r['frame_number']}: {r['detected_text']} "
-                      f"(confidence: {r['confidence']:.2f})")
+                      f"(confidence: {r['confidence']:.2f}){marker}")
