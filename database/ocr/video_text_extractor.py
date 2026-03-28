@@ -379,17 +379,20 @@ class VideoTextExtractor:
             if self._is_sponsor_text(text):
                 continue
 
+            # Track if this text matched any known player
+            matched_known_player = False
+
             # Try to match against player names
             for player_name in player_names:
                 match_score = self._calculate_match_score(text, player_name)
 
                 if match_score >= self.FUZZY_MATCH_THRESHOLD:
+                    matched_known_player = True
+
                     # Combined score factors in both OCR confidence and match quality
                     combined_score = ocr_confidence * match_score
 
                     # Require minimum combined score of 0.4
-                    # This means: high OCR conf (0.9) needs match >= 0.44
-                    # Or: perfect match (1.0) needs OCR conf >= 0.4
                     if combined_score < 0.4:
                         continue
 
@@ -401,6 +404,10 @@ class VideoTextExtractor:
                     # Keep the highest combined score for each player
                     if player_name not in player_scores or combined_score > player_scores[player_name]:
                         player_scores[player_name] = combined_score
+
+            # If no known player matched and this looks like a name, add as candidate
+            if not matched_known_player and self._looks_like_player_name(text, ocr_confidence):
+                self._add_player_candidate(text, ocr_confidence)
 
         # Filter to players with at least 1 detection and sort by score
         sorted_players = sorted(player_scores.items(), key=lambda x: (-x[1], x[0]))
@@ -486,6 +493,97 @@ class VideoTextExtractor:
                 return True
 
         return False
+
+    def _looks_like_player_name(self, text: str, confidence: float) -> bool:
+        """
+        Check if the detected text looks like it could be a player's name.
+
+        Heuristics used:
+        - Must have at least 2 words (first and last name)
+        - Each word must start with uppercase letter
+        - Must have reasonable length (4-30 chars)
+        - OCR confidence should be reasonably high (>= 0.6)
+
+        Args:
+            text: Detected text from OCR
+            confidence: OCR confidence score
+
+        Returns:
+            True if text looks like a potential player name
+        """
+        # Basic confidence threshold
+        if confidence < 0.6:
+            return False
+
+        # Length check
+        if len(text) < 4 or len(text) > 30:
+            return False
+
+        words = text.split()
+
+        # Must have at least 2 words (first and last name)
+        if len(words) < 2:
+            return False
+
+        # Each word should start with uppercase letter
+        for word in words:
+            if not word or not word[0].isupper():
+                return False
+
+        # Check against sponsor/scoreboard patterns to avoid false positives
+        if self._is_sponsor_text(text):
+            return False
+
+        if self._is_scoreboard_text(text):
+            return False
+
+        return True
+
+    def _add_player_candidate(self, name: str, confidence: float) -> Optional[int]:
+        """
+        Add a potential new player to the database as a candidate.
+
+        Candidates are marked with is_professional=0 (or use metadata to flag as candidate)
+        and can be reviewed manually to confirm if they are real players.
+
+        Args:
+            name: Detected player name
+            confidence: OCR confidence score
+
+        Returns:
+            Player ID if added, None if already exists or failed
+        """
+        # Normalize the name
+        name = name.strip()
+        if not name:
+            return None
+
+        with self.db.connection() as conn:
+            # Check if this name already exists (case-insensitive)
+            cursor = conn.execute(
+                "SELECT id FROM players WHERE LOWER(name) = LOWER(?)",
+                (name,)
+            )
+            if cursor.fetchone():
+                # Already exists
+                return None
+
+            try:
+                # Insert as candidate player
+                # is_professional=0 and metadata flags it as OCR candidate
+                cursor = conn.execute(
+                    """INSERT INTO players (name, country, is_professional, metadata, created_at)
+                       VALUES (?, 'UNK', 0, ?, datetime('now'))""",
+                    (name, f'{{"source": "OCR", "confidence": {confidence:.2f}, "status": "candidate"}}')
+                )
+                conn.commit()
+
+                print(f"    Added new player candidate: {name} (OCR confidence: {confidence:.2f})")
+                return cursor.lastrowid
+
+            except Exception as e:
+                print(f"    Failed to add player candidate '{name}': {e}")
+                return None
 
     def _mark_player_name_match(self, video_id: int, player_name: str):
         """Mark the OCR result that matched a player name"""
