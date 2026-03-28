@@ -333,11 +333,18 @@ class VideoTextExtractor:
         For compilation videos that contain multiple players, this method
         returns all detected players sorted by confidence (highest first).
 
+        Matching criteria:
+        - OCR confidence must be >= MIN_OCR_CONFIDENCE
+        - Text length must be >= MIN_NAME_LENGTH
+        - Fuzzy match score must be >= FUZZY_MATCH_THRESHOLD
+        - Combined score (OCR_conf * match_score) must be >= 0.4
+        - Player must be detected in at least 1 frame (tracked via detection_count)
+
         Args:
             ocr_results: List of OCR results
 
         Returns:
-            List of matched player names, sorted by best match score (descending)
+            List of matched player names, sorted by combined score (descending)
         """
         # Get all professional players from database
         players = self.db.get_all_players(professionals_only=True)
@@ -347,15 +354,17 @@ class VideoTextExtractor:
 
         player_names = [p['name'] for p in players]
 
-        # Track best score for each player
+        # Track best combined score and detection count for each player
+        # combined_score = max(ocr_confidence * match_score) across all detections
         player_scores: Dict[str, float] = {}
+        player_detection_count: Dict[str, int] = {}
 
         for result in ocr_results:
             text = result['detected_text']
-            confidence = result['confidence']
+            ocr_confidence = result['confidence']
 
-            # Skip low confidence results
-            if confidence < self.MIN_OCR_CONFIDENCE:
+            # Skip low confidence OCR results
+            if ocr_confidence < self.MIN_OCR_CONFIDENCE:
                 continue
 
             # Skip text that's too short
@@ -372,15 +381,29 @@ class VideoTextExtractor:
 
             # Try to match against player names
             for player_name in player_names:
-                score = self._calculate_match_score(text, player_name)
+                match_score = self._calculate_match_score(text, player_name)
 
-                if score >= self.FUZZY_MATCH_THRESHOLD:
-                    # Keep the highest score for each player
-                    if player_name not in player_scores or score > player_scores[player_name]:
-                        player_scores[player_name] = score
+                if match_score >= self.FUZZY_MATCH_THRESHOLD:
+                    # Combined score factors in both OCR confidence and match quality
+                    combined_score = ocr_confidence * match_score
 
-        # Sort by score (descending) and return player names
-        sorted_players = sorted(player_scores.items(), key=lambda x: x[1], reverse=True)
+                    # Require minimum combined score of 0.4
+                    # This means: high OCR conf (0.9) needs match >= 0.44
+                    # Or: perfect match (1.0) needs OCR conf >= 0.4
+                    if combined_score < 0.4:
+                        continue
+
+                    # Track detection count (number of independent detections)
+                    if player_name not in player_detection_count:
+                        player_detection_count[player_name] = 0
+                    player_detection_count[player_name] += 1
+
+                    # Keep the highest combined score for each player
+                    if player_name not in player_scores or combined_score > player_scores[player_name]:
+                        player_scores[player_name] = combined_score
+
+        # Filter to players with at least 1 detection and sort by score
+        sorted_players = sorted(player_scores.items(), key=lambda x: (-x[1], x[0]))
         return [player for player, score in sorted_players]
 
     def _calculate_match_score(self, ocr_text: str, player_name: str) -> float:
