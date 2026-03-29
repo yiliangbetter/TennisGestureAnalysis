@@ -500,7 +500,6 @@ class VideoTextExtractor:
 
         Heuristics used:
         - Must have at least 2 words (first and last name)
-        - Each word must start with uppercase letter
         - Must have reasonable length (4-30 chars)
         - OCR confidence should be reasonably high (>= 0.6)
 
@@ -524,11 +523,6 @@ class VideoTextExtractor:
         # Must have at least 2 words (first and last name)
         if len(words) < 2:
             return False
-
-        # Each word should start with uppercase letter
-        for word in words:
-            if not word or not word[0].isupper():
-                return False
 
         # Check against sponsor/scoreboard patterns to avoid false positives
         if self._is_sponsor_text(text):
