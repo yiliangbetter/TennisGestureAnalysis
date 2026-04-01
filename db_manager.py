@@ -242,21 +242,133 @@ def show_ocr():
     print()
 
 
+def delete_player(player_name):
+    """Delete a player from the database by name"""
+    conn = get_connection()
+
+    # First check if player exists
+    cursor = conn.execute(
+        "SELECT id, name FROM players WHERE LOWER(name) = LOWER(?)",
+        (player_name,)
+    )
+    player = cursor.fetchone()
+
+    if not player:
+        print(f"❌ Player '{player_name}' not found in database")
+        conn.close()
+        return False
+
+    print(f"\nFound player to delete:")
+    print(f"  ID: {player['id']}")
+    print(f"  Name: {player['name']}")
+
+    # Confirm deletion
+    confirm = input(f"\n⚠️  Are you sure you want to delete '{player['name']}'? [y/N]: ").strip().lower()
+    if confirm not in ('y', 'yes'):
+        print("❌ Deletion cancelled")
+        conn.close()
+        return False
+
+    try:
+        # Delete the player
+        conn.execute("DELETE FROM players WHERE id = ?", (player['id'],))
+        conn.commit()
+        print(f"✅ Successfully deleted '{player['name']}' (ID: {player['id']})")
+        conn.close()
+        return True
+
+    except Exception as e:
+        print(f"❌ Error deleting player: {e}")
+        conn.rollback()
+        conn.close()
+        return False
+
+
+def delete_candidate_players():
+    """Delete all candidate players (OCR discoveries)"""
+    conn = get_connection()
+
+    cursor = conn.execute(
+        "SELECT id, name FROM players WHERE metadata LIKE '%candidate%'"
+    )
+    candidates = cursor.fetchall()
+
+    if not candidates:
+        print("❌ No candidate players to delete")
+        conn.close()
+        return False
+
+    print(f"\nFound {len(candidates)} candidate player(s) to delete:")
+    for c in candidates:
+        print(f"  - {c['name']} (ID: {c['id']})")
+
+    confirm = input(f"\n⚠️  Delete all {len(candidates)} candidates? [y/N]: ").strip().lower()
+    if confirm not in ('y', 'yes'):
+        print("❌ Deletion cancelled")
+        conn.close()
+        return False
+
+    try:
+        conn.execute("DELETE FROM players WHERE metadata LIKE '%candidate%'")
+        conn.commit()
+        print(f"✅ Successfully deleted {len(candidates)} candidate player(s)")
+        conn.close()
+        return True
+
+    except Exception as e:
+        print(f"❌ Error deleting candidates: {e}")
+        conn.rollback()
+        conn.close()
+        return False
+
+
+def show_help():
+    """Show help message"""
+    print("""
+╔══════════════════════════════════════════════════════════════════════╗
+║           TENNIS GESTURE DATABASE MANAGER                          ║
+╠══════════════════════════════════════════════════════════════════════╣
+║                                                                      ║
+║  USAGE:                                                              ║
+║    python db_manager.py <command> [options]                         ║
+║                                                                      ║
+║  COMMANDS:                                                           ║
+║                                                                      ║
+║    Viewing Data:                                                     ║
+║    ─────────────                                                     ║
+║    summary          Show database summary                           ║
+║    players          List all players                                ║
+║    pros             List professional players only                  ║
+║    candidates       List candidate players (OCR discoveries)       ║
+║    videos           List all videos                                 ║
+║    ocr              List OCR results                                ║
+║                                                                      ║
+║    Managing Data:                                                    ║
+║    ─────────────                                                     ║
+║    delete <name>    Delete a specific player by name                ║
+║    clean-candidates Delete all candidate players                    ║
+║                                                                      ║
+║  EXAMPLES:                                                           ║
+║    python db_manager.py summary                                     ║
+║    python db_manager.py candidates                                  ║
+║    python db_manager.py delete "Mercedes Benz"                      ║
+║    python db_manager.py clean-candidates                            ║
+║                                                                      ║
+╚══════════════════════════════════════════════════════════════════════╝
+""")
+
+
 def main():
-    if len(sys.argv) < 2:
-        show_summary()
-        print("\nUsage:")
-        print("  python visualize_database.py              # Show summary")
-        print("  python visualize_database.py players      # Show all players")
-        print("  python visualize_database.py videos       # Show all videos")
-        print("  python visualize_database.py ocr          # Show OCR results")
-        print("  python visualize_database.py candidates   # Show candidate players")
-        print("  python visualize_database.py pros         # Show professional players only")
+    if len(sys.argv) < 2 or sys.argv[1] in ('-h', '--help', 'help'):
+        show_help()
         return
 
     command = sys.argv[1].lower()
 
-    if command == 'players':
+    # View commands
+    if command == 'summary' or command == 's':
+        show_summary()
+    elif command == 'players':
         show_players()
     elif command == 'pros' or command == 'professional':
         show_players(professional_only=True)
@@ -266,9 +378,22 @@ def main():
         show_videos()
     elif command == 'ocr':
         show_ocr()
+
+    # Management commands
+    elif command == 'delete':
+        if len(sys.argv) < 3:
+            print("❌ Error: Please specify a player name to delete")
+            print("   Example: python db_manager.py delete 'Mercedes Benz'")
+            return
+        player_name = ' '.join(sys.argv[2:])
+        delete_player(player_name)
+
+    elif command == 'clean-candidates':
+        delete_candidate_players()
+
     else:
-        print(f"Unknown command: {command}")
-        print("Valid commands: players, pros, candidates, videos, ocr")
+        print(f"❌ Unknown command: {command}")
+        print("\nRun 'python db_manager.py help' for usage information")
 
 
 if __name__ == '__main__':

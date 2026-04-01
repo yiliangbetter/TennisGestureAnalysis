@@ -45,7 +45,9 @@ class VideoTextExtractor:
         'KIA', 'ROLEX', 'IBM', 'ANZ', 'US OPEN', 'WIMBLEDON',
         'ROLAND GARROS', 'FRENCH OPEN', 'AUSTRALIAN OPEN',
         'ATP', 'WTA', 'LACOSTE', 'NIKE', 'ADIDAS', 'Wilson',
-        'HEAD', 'Babolat', 'YONEX', 'MIZUNO', 'PEPSI', 'HEINEKEN'
+        'HEAD', 'Babolat', 'YONEX', 'MIZUNO', 'PEPSI', 'HEINEKEN',
+        'MERCEDES', 'MERCEDES BENZ', 'MERCEDES-BENZ', 'BENZ',
+        'EMIRATES', 'QATAR AIRWAYS', 'LUFTHANSA', 'CITIZEN'
     ]
 
     # Minimum text length to consider as player name
