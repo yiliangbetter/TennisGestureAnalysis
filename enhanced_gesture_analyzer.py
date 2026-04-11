@@ -10,21 +10,18 @@ import math
 
 # MediaPipe imports - support both legacy and new API
 try:
-    # Legacy API (mediapipe < 0.10.30)
     import mediapipe as mp
-    from mediapipe import solutions
-    if hasattr(mp, 'solutions') and hasattr(mp.solutions, 'pose'):
-        from mediapipe.solutions import pose as mp_pose
-        MEDIAPIPE_LEGACY = True
-    else:
-        MEDIAPIPE_LEGACY = False
+    from mediapipe.tasks.python import vision
+    from mediapipe.tasks.python.core import BaseOptions
+    MEDIAPIPE_AVAILABLE = True
+    MEDIAPIPE_LEGACY = False  # We use the new Tasks API
 except ImportError:
     mp = None
+    MEDIAPIPE_AVAILABLE = False
     MEDIAPIPE_LEGACY = False
-    mp_pose = None
 
-# If legacy API not available, use OpenCV DNN-based pose estimation
-USE_OPENCV_POSE = not MEDIAPIPE_LEGACY
+# Use OpenCV DNN-based pose estimation only if MediaPipe not available
+USE_OPENCV_POSE = not MEDIAPIPE_AVAILABLE
 
 # Fallback landmark layout: fractions of bounding box height (bh) or width (bw).
 # All offsets are scale-invariant (fraction of bh/bw), not pixel values.
@@ -73,31 +70,35 @@ class EnhancedTennisGestureAnalyzer:
 
         Args:
             use_opencv_pose: If True, use OpenCV DNN-based pose estimation.
-                           If False, try MediaPipe (default).
+                           If False, use MediaPipe (default).
         """
         self.use_opencv_pose = use_opencv_pose or USE_OPENCV_POSE
+        self.pose_detector = None
 
         if self.use_opencv_pose:
             # Initialize OpenCV DNN-based pose estimator
-            # Using OpenPose or similar model would require downloading weights
-            # For now, we'll use a simpler approach with fallback
-            self.pose_detector = None
             print("Using OpenCV-based pose estimation (placeholder)")
-        else:
-            # Initialize MediaPipe Pose for real landmark detection
-            if MEDIAPIPE_LEGACY:
-                self.mp_pose = mp.solutions.pose
-                self.pose = self.mp_pose.Pose(
-                    static_image_mode=False,
-                    model_complexity=1,
-                    enable_segmentation=False,
-                    min_detection_confidence=0.5,
-                    min_tracking_confidence=0.5
+        elif MEDIAPIPE_AVAILABLE:
+            # Initialize MediaPipe Tasks API Pose Landmarker
+            try:
+                base_options = BaseOptions(
+                    model_asset_path=''  # Uses default model
                 )
-            else:
-                # Fallback: MediaPipe not fully available
+                options = vision.PoseLandmarkerOptions(
+                    base_options=base_options,
+                    running_mode=vision.RunningMode.VIDEO,
+                    num_poses=1,
+                    min_pose_detection_confidence=0.5,
+                    min_pose_presence_confidence=0.5,
+                    min_tracking_confidence=0.5,
+                )
+                self.pose_detector = vision.PoseLandmarker.create_from_options(options)
+                print("MediaPipe Pose Landmarker initialized successfully")
+            except Exception as e:
+                print(f"Warning: Failed to initialize MediaPipe pose detector: {e}")
                 self.pose_detector = None
-                print("Warning: MediaPipe pose detection not available. Using fallback mode.")
+        else:
+            print("Warning: MediaPipe not available. Using fallback mode.")
 
         # Store previous frame landmarks and velocity for interpolation when detection fails
         self.prev_landmarks: Optional[np.ndarray] = None

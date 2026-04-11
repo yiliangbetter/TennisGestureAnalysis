@@ -552,7 +552,304 @@ class TestSchemaValidation(unittest.TestCase):
         self.assertGreater(len(players), 0)
 
 
+class TestSponsorFiltering(unittest.TestCase):
+    """Test sponsor name filtering including Mercedes Benz and Emirates"""
+
+    def setUp(self):
+        self.test_db_path = create_temp_db()
+        self.extractor = VideoTextExtractor(db_path=self.test_db_path, use_easyocr=False)
+
+    def tearDown(self):
+        self.extractor.db.close()
+        try:
+            os.unlink(self.test_db_path)
+        except:
+            pass
+
+    def test_mercedes_benz_filtered(self):
+        """Test Mercedes Benz is filtered as sponsor"""
+        self.assertTrue(self.extractor._is_sponsor_text("MERCEDES"))
+        self.assertTrue(self.extractor._is_sponsor_text("MERCEDES BENZ"))
+        self.assertTrue(self.extractor._is_sponsor_text("MERCEDES-BENZ"))
+        self.assertTrue(self.extractor._is_sponsor_text("BENZ"))
+
+    def test_emirates_filtered(self):
+        """Test Emirates is filtered as sponsor"""
+        self.assertTrue(self.extractor._is_sponsor_text("EMIRATES"))
+
+    def test_qatar_airways_filtered(self):
+        """Test Qatar Airways is filtered as sponsor"""
+        self.assertTrue(self.extractor._is_sponsor_text("QATAR AIRWAYS"))
+
+    def test_lufthansa_filtered(self):
+        """Test Lufthansa is filtered as sponsor"""
+        self.assertTrue(self.extractor._is_sponsor_text("LUFTHANSA"))
+
+    def test_citizen_filtered(self):
+        """Test Citizen is filtered as sponsor"""
+        self.assertTrue(self.extractor._is_sponsor_text("CITIZEN"))
+
+    def test_player_name_not_sponsor(self):
+        """Test player names are not filtered as sponsors"""
+        self.assertFalse(self.extractor._is_sponsor_text("Novak Djokovic"))
+        self.assertFalse(self.extractor._is_sponsor_text("Carlos Alcaraz"))
+
+
+class TestLooksLikePlayerName(unittest.TestCase):
+    """Test the _looks_like_player_name function"""
+
+    def setUp(self):
+        self.test_db_path = create_temp_db()
+        self.extractor = VideoTextExtractor(db_path=self.test_db_path, use_easyocr=False)
+
+    def tearDown(self):
+        self.extractor.db.close()
+        try:
+            os.unlink(self.test_db_path)
+        except:
+            pass
+
+    def test_valid_player_name(self):
+        """Test valid player name is recognized"""
+        self.assertTrue(self.extractor._looks_like_player_name("Roger Federer", 0.92))
+        self.assertTrue(self.extractor._looks_like_player_name("Rafael Nadal", 0.88))
+
+    def test_low_confidence_rejected(self):
+        """Test low confidence OCR is rejected"""
+        self.assertFalse(self.extractor._looks_like_player_name("Roger Federer", 0.3))
+
+    def test_single_word_rejected(self):
+        """Test single word is rejected (needs first + last name)"""
+        self.assertFalse(self.extractor._looks_like_player_name("Federer", 0.92))
+
+    def test_lowercase_rejected(self):
+        """Test lowercase names are rejected"""
+        self.assertFalse(self.extractor._looks_like_player_name("roger federer", 0.92))
+
+    def test_sponsor_rejected(self):
+        """Test sponsor names are rejected"""
+        self.assertFalse(self.extractor._looks_like_player_name("Mercedes Benz", 0.95))
+
+
+class TestAddPlayerCandidate(unittest.TestCase):
+    """Test the _add_player_candidate function"""
+
+    def setUp(self):
+        self.test_db_path = create_temp_db()
+        self.extractor = VideoTextExtractor(db_path=self.test_db_path, use_easyocr=False)
+
+    def tearDown(self):
+        self.extractor.db.close()
+        try:
+            os.unlink(self.test_db_path)
+        except:
+            pass
+
+    def test_add_new_candidate(self):
+        """Test adding a new player candidate"""
+        player_id = self.extractor._add_player_candidate("Tommy Paul", 0.92)
+        self.assertIsNotNone(player_id)
+
+        # Verify player was added
+        with self.extractor.db.connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM players WHERE LOWER(name) = LOWER(?)",
+                ("Tommy Paul",)
+            )
+            player = cursor.fetchone()
+            self.assertIsNotNone(player)
+            self.assertEqual(player['name'], "Tommy Paul")
+            self.assertEqual(player['country'], 'UNK')
+            self.assertEqual(player['is_professional'], 0)
+            self.assertIn('candidate', player['metadata'])
+
+    def test_duplicate_not_added(self):
+        """Test duplicate player is not added"""
+        # Add first time
+        self.extractor._add_player_candidate("Tommy Paul", 0.92)
+
+        # Try to add again - should return None
+        player_id = self.extractor._add_player_candidate("Tommy Paul", 0.95)
+        self.assertIsNone(player_id)
+
+    def test_empty_name_not_added(self):
+        """Test empty name is not added"""
+        player_id = self.extractor._add_player_candidate("", 0.92)
+        self.assertIsNone(player_id)
+
+
+class TestMatchAllPlayerNames(unittest.TestCase):
+    """Test the _match_all_player_names function"""
+
+    def setUp(self):
+        self.test_db_path = create_temp_db()
+        self.extractor = VideoTextExtractor(db_path=self.test_db_path, use_easyocr=False)
+        self.db = self.extractor.db
+
+        # Add multiple test players
+        self.players = [
+            "Novak Djokovic",
+            "Carlos Alcaraz",
+            "Jannik Sinner",
+            "Rafael Nadal"
+        ]
+        for name in self.players:
+            self.db.add_player(name, is_professional=True)
+
+    def tearDown(self):
+        self.extractor.db.close()
+        try:
+            os.unlink(self.test_db_path)
+        except:
+            pass
+
+    def test_multiple_players_detected(self):
+        """Test that multiple players in same video are all detected"""
+        ocr_results = [
+            {'detected_text': 'Novak Djokovic', 'confidence': 0.98, 'frame_number': 0},
+            {'detected_text': 'Carlos Alcaraz', 'confidence': 0.95, 'frame_number': 100},
+            {'detected_text': 'Jannik Sinner', 'confidence': 0.97, 'frame_number': 200},
+        ]
+
+        matched = self.extractor._match_all_player_names(ocr_results)
+        self.assertEqual(len(matched), 3)
+        self.assertIn('Novak Djokovic', matched)
+        self.assertIn('Carlos Alcaraz', matched)
+        self.assertIn('Jannik Sinner', matched)
+
+    def test_single_player_detected(self):
+        """Test single player in video is detected"""
+        ocr_results = [
+            {'detected_text': 'Rafael Nadal', 'confidence': 0.96, 'frame_number': 0},
+        ]
+
+        matched = self.extractor._match_all_player_names(ocr_results)
+        self.assertEqual(len(matched), 1)
+        self.assertEqual(matched[0], 'Rafael Nadal')
+
+    def test_empty_ocr_results(self):
+        """Test empty OCR results returns empty list"""
+        matched = self.extractor._match_all_player_names([])
+        self.assertEqual(len(matched), 0)
+
+    def test_no_valid_matches(self):
+        """Test no valid player matches returns empty list"""
+        ocr_results = [
+            {'detected_text': 'Unknown Player', 'confidence': 0.95, 'frame_number': 0},
+            {'detected_text': 'Random Text', 'confidence': 0.90, 'frame_number': 100},
+        ]
+
+        matched = self.extractor._match_all_player_names(ocr_results)
+        self.assertEqual(len(matched), 0)
+
+
+class TestSponsorList(unittest.TestCase):
+    """Test the updated sponsor list including Mercedes Benz and others"""
+
+    def setUp(self):
+        self.test_db_path = create_temp_db()
+        self.extractor = VideoTextExtractor(db_path=self.test_db_path, use_easyocr=False)
+
+    def tearDown(self):
+        self.extractor.db.close()
+        try:
+            os.unlink(self.test_db_path)
+        except:
+            pass
+
+    def test_mercedes_benz_variations(self):
+        """Test all Mercedes Benz variations are filtered"""
+        variations = [
+            "MERCEDES",
+            "MERCEDES BENZ",
+            "MERCEDES-BENZ",
+            "BENZ"
+        ]
+        for variation in variations:
+            with self.subTest(variation=variation):
+                self.assertTrue(
+                    self.extractor._is_sponsor_text(variation),
+                    f"'{variation}' should be filtered as sponsor"
+                )
+
+    def test_emirates_filtered(self):
+        """Test Emirates is filtered"""
+        self.assertTrue(self.extractor._is_sponsor_text("EMIRATES"))
+        self.assertTrue(self.extractor._is_sponsor_text("emirates"))  # Case insensitive
+
+    def test_qatar_airways_filtered(self):
+        """Test Qatar Airways is filtered"""
+        self.assertTrue(self.extractor._is_sponsor_text("QATAR AIRWAYS"))
+
+    def test_lufthansa_filtered(self):
+        """Test Lufthansa is filtered"""
+        self.assertTrue(self.extractor._is_sponsor_text("LUFTHANSA"))
+
+    def test_citizen_filtered(self):
+        """Test Citizen is filtered"""
+        self.assertTrue(self.extractor._is_sponsor_text("CITIZEN"))
+
+    def test_original_sponsors_still_filtered(self):
+        """Test original sponsors are still filtered"""
+        original_sponsors = [
+            "KIA", "ROLEX", "IBM", "US OPEN", "WIMBLEDON",
+            "ROLAND GARROS", "NIKE", "ADIDAS"
+        ]
+        for sponsor in original_sponsors:
+            with self.subTest(sponsor=sponsor):
+                self.assertTrue(
+                    self.extractor._is_sponsor_text(sponsor),
+                    f"'{sponsor}' should still be filtered"
+                )
+
+    def test_player_names_not_sponsors(self):
+        """Test player names are not filtered as sponsors"""
+        player_names = [
+            "Novak Djokovic", "Carlos Alcaraz", "Jannik Sinner",
+            "Rafael Nadal", "Roger Federer"
+        ]
+        for name in player_names:
+            with self.subTest(name=name):
+                self.assertFalse(
+                    self.extractor._is_sponsor_text(name),
+                    f"'{name}' should not be filtered as sponsor"
+                )
+
+
 def run_tests():
+    """Run all tests and print results"""
+    # Create test suite
+    loader = unittest.TestLoader()
+    suite = unittest.TestSuite()
+
+    # Add all test classes
+    suite.addTests(loader.loadTestsFromTestCase(TestVideoTextExtractor))
+    suite.addTests(loader.loadTestsFromTestCase(TestPlayerNameMatching))
+    suite.addTests(loader.loadTestsFromTestCase(TestScoreboardFiltering))
+    suite.addTests(loader.loadTestsFromTestCase(TestMatchScoreCalculation))
+    suite.addTests(loader.loadTestsFromTestCase(TestDatabaseOperations))
+    suite.addTests(loader.loadTestsFromTestCase(TestIntegration))
+    suite.addTests(loader.loadTestsFromTestCase(TestCalculateMatchScore))
+    suite.addTests(loader.loadTestsFromTestCase(TestSchemaValidation))
+
+    # Run tests
+    runner = unittest.TextTestRunner(verbosity=2)
+    result = runner.run(suite)
+
+    # Print summary
+    print("\n" + "="*60)
+    print(f"Tests run: {result.testsRun}")
+    print(f"Failures: {len(result.failures)}")
+    print(f"Errors: {len(result.errors)}")
+    print(f"Skipped: {len(result.skipped)}")
+    print("="*60)
+
+    return result.wasSuccessful()
+
+
+if __name__ == "__main__":
+    success = run_tests()
+    sys.exit(0 if success else 1)
     """Run all tests and print results"""
     # Create test suite
     loader = unittest.TestLoader()
